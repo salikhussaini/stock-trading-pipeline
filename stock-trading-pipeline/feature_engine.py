@@ -1,0 +1,379 @@
+# =========================================================
+# feature_engine.py
+# Stock Feature Generation Pipeline (DuckDB → Features)
+# SHORT-TERM vs LONG-TERM Indicator Organization
+# Parallel Processing by Ticker with 75+ Advanced Indicators
+# =========================================================
+
+from pathlib import Path
+from multiprocessing import Pool
+import duckdb
+import pandas as pd
+import numpy as np
+import traceback
+import time
+
+from logger_config import (
+    log_info, log_error, log_exception, log_warning,
+    log_section, log_pipeline_start, log_pipeline_end, log_metrics
+)
+
+DB_PATH = Path(__file__).parent / "database" / "stock_data.duckdb"
+FEATURES_PATH = Path(__file__).parent / "database" / "stock_features.parquet"
+
+# Configuration
+MIN_DATA_POINTS = 50  # Minimum rows required to compute features
+CHUNK_SIZE = 50000  # Batch insert size (increased for better I/O)
+
+# =========================================================
+# FEATURE CATEGORIES BY TIMEFRAME
+# =========================================================
+# SHORT-TERM (1-14 day lookback): Scalping, day trading, swing trading
+#   - Fast RSI (7, 14), Fast Stochastic (5, 14), Fast MACD
+#   - Short-term moving averages (5, 10 days)
+#   - Quick momentum & volatility metrics
+#
+# LONG-TERM (20+ day lookback): Trend following, position trading
+#   - Slow RSI (28, 42), Extended Stochastic (28)
+#   - Long-term moving averages (20, 50 days)
+#   - ADX trend strength, sustained momentum
+#
+# CROSS-TIMEFRAME DIVERGENCE:
+#   - RSI/ROC/MACD divergence between short & long term
+#   - Volatility ratio, momentum alignment for confluence signals
+# =========================================================
+
+# =========================================================
+# FEATURE ENGINEERING FOR SINGLE TICKER (Worker Function)
+# =========================================================
+
+def compute_ticker_features(ticker_data: pd.DataFrame) -> tuple:
+    """
+    Compute all features for a single ticker's data.
+    Returns features in WIDE FORMAT (one row per ticker-date, 70+ feature columns).
+    Worker function for parallel processing.
+    Returns (DataFrame, ticker, error_msg or None)
+    """
+    try:
+        ticker = ticker_data["ticker"].iloc[0]
+        
+        # Skip if insufficient data
+        if len(ticker_data) < MIN_DATA_POINTS:
+            return None, ticker, f"Insufficient data ({len(ticker_data)} rows < {MIN_DATA_POINTS})"
+        
+        ticker_data = ticker_data.sort_values("date").reset_index(drop=True)
+        
+        # Remove outliers (close > 3 std from mean)
+        close_mean = ticker_data["close"].mean()
+        close_std = ticker_data["close"].std()
+        mask = (ticker_data["close"] - close_mean).abs() <= 3 * close_std
+        if not mask.all():
+            ticker_data = ticker_data[mask].reset_index(drop=True)
+
+        # =========================================================
+        # HELPER FUNCTIONS
+        # =========================================================
+        def rsi(series, period=14):
+            """Compute Relative Strength Index"""
+            delta = series.diff()
+            gain = delta.clip(lower=0).rolling(period).mean()
+            loss = (-delta.clip(upper=0)).rolling(period).mean()
+            rs = gain / (loss + 1e-9)
+            return 100 - (100 / (1 + rs))
+
+        def stochastic(high, low, close, period=14):
+            """Compute Stochastic Oscillator %K"""
+            lowest_low = low.rolling(period).min()
+            highest_high = high.rolling(period).max()
+            k = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-9)
+            return k
+
+        def atr(high, low, close, period=14):
+            """Compute Average True Range"""
+            tr1 = high - low
+            tr2 = (high - close.shift()).abs()
+            tr3 = (low - close.shift()).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            return tr.rolling(period).mean()
+
+        def adx(high, low, close, period=14):
+            """Compute Average Directional Index (trend strength)"""
+            plus_dm = high.diff().clip(lower=0)
+            minus_dm = (-low.diff()).clip(lower=0)
+            plus_dm = plus_dm.where(plus_dm > minus_dm, 0)
+            minus_dm = minus_dm.where(minus_dm > plus_dm, 0)
+            
+            tr1 = high - low
+            tr2 = (high - close.shift()).abs()
+            tr3 = (low - close.shift()).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr_val = tr.rolling(period).mean()
+            
+            plus_di = 100 * plus_dm.rolling(period).mean() / (atr_val + 1e-9)
+            minus_di = 100 * minus_dm.rolling(period).mean() / (atr_val + 1e-9)
+            dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+            adx_val = dx.rolling(period).mean()
+            return adx_val
+
+        # =========================================================
+        # SHORT-TERM INDICATORS (1-14 day lookback)
+        # =========================================================
+        
+        # Short-term Returns
+        ticker_data["st_return_1d"] = ticker_data["close"].pct_change(1)
+        ticker_data["st_return_5d"] = ticker_data["close"].pct_change(5)
+        ticker_data["st_return_7d"] = ticker_data["close"].pct_change(7)
+        
+        # Short-term Moving Averages & Positioning
+        ticker_data["st_sma_5"] = ticker_data["close"].rolling(5).mean()
+        ticker_data["st_sma_10"] = ticker_data["close"].rolling(10).mean()
+        ticker_data["st_ema_5"] = ticker_data["close"].ewm(span=5, adjust=False).mean()
+        ticker_data["st_ema_10"] = ticker_data["close"].ewm(span=10, adjust=False).mean()
+        
+        # Short-term vs Moving Averages (trend alignment)
+        ticker_data["st_above_sma5"] = (ticker_data["close"] > ticker_data["st_sma_5"]).astype(int)
+        ticker_data["st_above_ema10"] = (ticker_data["close"] > ticker_data["st_ema_10"]).astype(int)
+        
+        # Short-term Volatility
+        ticker_data["st_vol_5d"] = ticker_data["close"].pct_change().rolling(5).std()
+        ticker_data["st_vol_10d"] = ticker_data["close"].pct_change().rolling(10).std()
+        
+        # Short-term RSI (fast oscillator)
+        ticker_data["st_rsi_7"] = rsi(ticker_data["close"], 7)
+        ticker_data["st_rsi_14"] = rsi(ticker_data["close"], 14)
+        
+        # Short-term Stochastic (fast)
+        ticker_data["st_stoch_k_5"] = stochastic(
+            ticker_data["high"], ticker_data["low"], ticker_data["close"], 5
+        )
+        ticker_data["st_stoch_k_14"] = stochastic(
+            ticker_data["high"], ticker_data["low"], ticker_data["close"], 14
+        )
+        ticker_data["st_stoch_d_5"] = ticker_data["st_stoch_k_5"].rolling(3).mean()
+        ticker_data["st_stoch_d_14"] = ticker_data["st_stoch_k_14"].rolling(3).mean()
+        
+        # Short-term Momentum
+        ticker_data["st_momentum_5"] = ticker_data["close"] - ticker_data["close"].shift(5)
+        ticker_data["st_momentum_10"] = ticker_data["close"] - ticker_data["close"].shift(10)
+        ticker_data["st_roc_5"] = ticker_data["close"].pct_change(5)
+        ticker_data["st_roc_7"] = ticker_data["close"].pct_change(7)
+        
+        # Short-term MACD (fast)
+        st_ema5 = ticker_data["close"].ewm(span=5, adjust=False).mean()
+        st_ema13 = ticker_data["close"].ewm(span=13, adjust=False).mean()
+        ticker_data["st_macd"] = st_ema5 - st_ema13
+        ticker_data["st_macd_signal"] = ticker_data["st_macd"].ewm(span=5, adjust=False).mean()
+        ticker_data["st_macd_histogram"] = ticker_data["st_macd"] - ticker_data["st_macd_signal"]
+        
+        # Short-term ATR
+        ticker_data["st_atr_7"] = atr(ticker_data["high"], ticker_data["low"], ticker_data["close"], 7)
+        ticker_data["st_atr_ratio"] = ticker_data["st_atr_7"] / ticker_data["close"]
+        
+        # Short-term Volume
+        vol_mean_5 = ticker_data["volume"].rolling(5).mean()
+        vol_std_5 = ticker_data["volume"].rolling(5).std()
+        ticker_data["st_volume_zscore_5d"] = (ticker_data["volume"] - vol_mean_5) / (vol_std_5 + 1e-9)
+        ticker_data["st_volume_ratio_5d"] = ticker_data["volume"] / vol_mean_5
+
+        # =========================================================
+        # LONG-TERM INDICATORS (20+ day lookback)
+        # =========================================================
+        
+        # Long-term Returns
+        ticker_data["lt_return_20d"] = ticker_data["close"].pct_change(20)
+        ticker_data["lt_return_50d"] = ticker_data["close"].pct_change(50)
+        
+        # Long-term Moving Averages & Positioning
+        ticker_data["lt_sma_20"] = ticker_data["close"].rolling(20).mean()
+        ticker_data["lt_sma_50"] = ticker_data["close"].rolling(50).mean()
+        ticker_data["lt_ema_20"] = ticker_data["close"].ewm(span=20, adjust=False).mean()
+        ticker_data["lt_ema_50"] = ticker_data["close"].ewm(span=50, adjust=False).mean()
+        
+        # Long-term vs Moving Averages (trend alignment)
+        ticker_data["lt_above_sma20"] = (ticker_data["close"] > ticker_data["lt_sma_20"]).astype(int)
+        ticker_data["lt_above_sma50"] = (ticker_data["close"] > ticker_data["lt_sma_50"]).astype(int)
+        ticker_data["lt_sma_alignment"] = (ticker_data["lt_sma_20"] > ticker_data["lt_sma_50"]).astype(int)
+        
+        # Long-term Volatility
+        ticker_data["lt_vol_20d"] = ticker_data["close"].pct_change().rolling(20).std()
+        ticker_data["lt_vol_50d"] = ticker_data["close"].pct_change().rolling(50).std()
+        
+        # Long-term RSI (slow oscillator)
+        ticker_data["lt_rsi_28"] = rsi(ticker_data["close"], 28)
+        ticker_data["lt_rsi_42"] = rsi(ticker_data["close"], 42)
+        
+        # Long-term Stochastic
+        ticker_data["lt_stoch_k_28"] = stochastic(
+            ticker_data["high"], ticker_data["low"], ticker_data["close"], 28
+        )
+        ticker_data["lt_stoch_d_28"] = ticker_data["lt_stoch_k_28"].rolling(3).mean()
+        
+        # Long-term Momentum
+        ticker_data["lt_momentum_20"] = ticker_data["close"] - ticker_data["close"].shift(20)
+        ticker_data["lt_momentum_50"] = ticker_data["close"] - ticker_data["close"].shift(50)
+        ticker_data["lt_roc_20"] = ticker_data["close"].pct_change(20)
+        ticker_data["lt_roc_50"] = ticker_data["close"].pct_change(50)
+        
+        # Long-term MACD (standard)
+        lt_ema12 = ticker_data["close"].ewm(span=12, adjust=False).mean()
+        lt_ema26 = ticker_data["close"].ewm(span=26, adjust=False).mean()
+        ticker_data["lt_macd"] = lt_ema12 - lt_ema26
+        ticker_data["lt_macd_signal"] = ticker_data["lt_macd"].ewm(span=9, adjust=False).mean()
+        ticker_data["lt_macd_histogram"] = ticker_data["lt_macd"] - ticker_data["lt_macd_signal"]
+        
+        # Long-term ADX (trend strength)
+        ticker_data["lt_adx_14"] = adx(ticker_data["high"], ticker_data["low"], ticker_data["close"], 14)
+        ticker_data["lt_adx_28"] = adx(ticker_data["high"], ticker_data["low"], ticker_data["close"], 28)
+        
+        # Long-term ATR
+        ticker_data["lt_atr_14"] = atr(ticker_data["high"], ticker_data["low"], ticker_data["close"], 14)
+        ticker_data["lt_atr_ratio"] = ticker_data["lt_atr_14"] / ticker_data["close"]
+        
+        # Long-term Bollinger Bands
+        lt_sma20 = ticker_data["close"].rolling(20).mean()
+        lt_std20 = ticker_data["close"].rolling(20).std()
+        ticker_data["lt_bb_upper"] = lt_sma20 + (lt_std20 * 2)
+        ticker_data["lt_bb_lower"] = lt_sma20 - (lt_std20 * 2)
+        ticker_data["lt_bb_width"] = (ticker_data["lt_bb_upper"] - ticker_data["lt_bb_lower"]) / lt_sma20
+        ticker_data["lt_bb_position"] = (ticker_data["close"] - ticker_data["lt_bb_lower"]) / (
+            ticker_data["lt_bb_upper"] - ticker_data["lt_bb_lower"] + 1e-9
+        )
+        
+        # Long-term Volume
+        vol_mean_20 = ticker_data["volume"].rolling(20).mean()
+        vol_std_20 = ticker_data["volume"].rolling(20).std()
+        ticker_data["lt_volume_zscore_20d"] = (ticker_data["volume"] - vol_mean_20) / (vol_std_20 + 1e-9)
+        ticker_data["lt_volume_ratio_20d"] = ticker_data["volume"] / vol_mean_20
+
+        # =========================================================
+        # PRICE ACTION (Timeframe-agnostic)
+        # =========================================================
+        ticker_data["high_low_ratio"] = ticker_data["high"] / ticker_data["low"]
+        ticker_data["close_open_ratio"] = ticker_data["close"] / ticker_data["open"]
+        ticker_data["close_position"] = (ticker_data["close"] - ticker_data["low"]) / (
+            ticker_data["high"] - ticker_data["low"] + 1e-9
+        )
+
+        # =========================================================
+        # CROSS-TIMEFRAME COMPARATIVE METRICS (ST vs LT divergence)
+        # =========================================================
+        ticker_data["rsi_divergence_7_28"] = ticker_data["st_rsi_7"] - ticker_data["lt_rsi_28"]
+        ticker_data["roc_divergence_5_20"] = ticker_data["st_roc_5"] - ticker_data["lt_roc_20"]
+        ticker_data["macd_divergence"] = ticker_data["st_macd"] - ticker_data["lt_macd"]
+        ticker_data["vol_ratio_st_lt"] = ticker_data["st_vol_5d"] / (ticker_data["lt_vol_20d"] + 1e-9)
+        ticker_data["momentum_alignment"] = (
+            (ticker_data["st_momentum_5"] > 0).astype(int) + 
+            (ticker_data["lt_momentum_20"] > 0).astype(int)
+        )  # 0=both down, 1=divergence, 2=both up
+
+        return ticker_data, ticker, None
+
+    except Exception as e:
+        ticker = ticker_data["ticker"].iloc[0] if len(ticker_data) > 0 else "UNKNOWN"
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        return None, ticker, error_msg
+
+# =========================================================
+# MAIN PIPELINE (PARALLEL BY TICKER)
+# =========================================================
+
+def run_feature_pipeline(num_workers=8):
+    """
+    Run feature engineering pipeline with parallel processing.
+    Each worker processes features for one ticker at a time.
+    """
+    conn = duckdb.connect(str(DB_PATH))
+
+    # -------------------------
+    # LOAD RAW DATA
+    # -------------------------
+    df = conn.execute("""
+        SELECT ticker, date, open, high, low, close, adj_close, volume
+        FROM daily_prices
+        ORDER BY ticker, date
+    """).df()
+
+    if df.empty:
+        log_error("No data found in daily_prices")
+        conn.close()
+        return
+
+    num_tickers = df['ticker'].nunique()
+    log_info(f"Processing {num_tickers} tickers ({num_workers} workers)...")
+
+    # -------------------------
+    # SPLIT BY TICKER
+    # -------------------------
+    ticker_groups = [group for _, group in df.groupby("ticker")]
+
+    # -------------------------
+    # PARALLEL FEATURE COMPUTATION WITH ERROR HANDLING
+    # -------------------------
+    all_results = []
+    failed_tickers = []
+    successful_tickers = []
+    
+    with Pool(num_workers) as pool:
+        results = pool.map(compute_ticker_features, ticker_groups)
+
+    for result_df, ticker, error in results:
+        if error:
+            failed_tickers.append((ticker, error))
+        else:
+            all_results.append(result_df)
+            successful_tickers.append(ticker)
+
+    log_info(f"Success: {len(successful_tickers)}/{num_tickers} | Failed: {len(failed_tickers)}")
+
+    if failed_tickers:
+        for ticker, error in failed_tickers[:5]:  # Show first 5 errors
+            log_warning(f"  {ticker}: {error}")
+        if len(failed_tickers) > 5:
+            log_warning(f"  ... and {len(failed_tickers)-5} more")
+
+    if not all_results:
+        log_error("No valid features generated")
+        conn.close()
+        return
+
+    # -------------------------
+    # COMBINE RESULTS (already in wide format)
+    # -------------------------
+    df_feat = pd.concat(all_results, ignore_index=True)
+
+    # rename date → report_date
+    df_feat = df_feat.rename(columns={"date": "report_date"})
+
+    log_info(f"Generated {len(df_feat)} feature rows ({df_feat['ticker'].nunique()} tickers) with {len(df_feat.columns)-3} features")
+
+    # -------------------------
+    # WRITE TO PARQUET (Fast, compressed storage via DuckDB)
+    # Keep only ticker, report_date, close, volume, and computed features (drop raw OHLCV)
+    # -------------------------
+    raw_cols = ["open", "high", "low", "adj_close"]
+    df_feat = df_feat.drop(columns=raw_cols, errors="ignore")
+    
+    write_start = time.perf_counter()
+    # Use DuckDB to write parquet (10x faster than pandas.to_parquet for large datasets)
+    conn.execute(f"COPY df_feat TO '{FEATURES_PATH}' (FORMAT PARQUET, COMPRESSION 'snappy')")
+    write_time = time.perf_counter() - write_start
+
+    conn.close()
+
+    log_info(f"Parquet write time: {write_time:.2f}s ({len(df_feat)/write_time:,.0f} rows/sec)")
+    log_info(f"Features saved to: {FEATURES_PATH}")
+
+# =========================================================
+# RUN
+# =========================================================
+
+if __name__ == "__main__":
+    log_pipeline_start("Feature Engine", tickers="all")
+    try:
+        # Use 8 workers (adjust based on your CPU cores)
+        # Recommended: num_workers = os.cpu_count() or 8
+        run_feature_pipeline(num_workers=8)
+        log_pipeline_end("Feature Engine", status="SUCCESS")
+    except Exception as e:
+        log_exception(e, "Feature Engine failed")
+        log_pipeline_end("Feature Engine", status="FAILED")
