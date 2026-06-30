@@ -7,11 +7,19 @@
 
 from pathlib import Path
 from multiprocessing import Pool
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import duckdb
 import pandas as pd
 import numpy as np
 import traceback
 import time
+import sys
+import os
+
+# Ensure multiprocessing works on Windows
+if sys.platform == 'win32':
+    import multiprocessing
+    multiprocessing.freeze_support()
 
 from logger_config import (
     log_info, log_error, log_exception, log_warning,
@@ -24,6 +32,7 @@ FEATURES_PATH = Path(__file__).parent / "database" / "stock_features.parquet"
 # Configuration
 MIN_DATA_POINTS = 50  # Minimum rows required to compute features
 CHUNK_SIZE = 50000  # Batch insert size (increased for better I/O)
+MAX_NAN_RATIO = 0.3  # Drop rows where >30% of features are NaN
 
 # =========================================================
 # FEATURE CATEGORIES BY TIMEFRAME
@@ -285,13 +294,28 @@ def run_feature_pipeline(num_workers=8):
     conn = duckdb.connect(str(DB_PATH))
 
     # -------------------------
+    # VALIDATE INPUT
+    # -------------------------
+    ticker_count = conn.execute("SELECT COUNT(DISTINCT ticker) FROM daily_prices").fetchone()[0]
+    if ticker_count == 0:
+        log_error("No data found in daily_prices")
+        conn.close()
+        return
+
+    # -------------------------
     # LOAD RAW DATA
     # -------------------------
+    log_info(f"Loading data for {ticker_count} tickers...")
+    load_start = time.perf_counter()
+    
     df = conn.execute("""
         SELECT ticker, date, open, high, low, close, adj_close, volume
         FROM daily_prices
         ORDER BY ticker, date
     """).df()
+
+    load_time = time.perf_counter() - load_start
+    log_info(f"Data loaded: {len(df):,} rows in {load_time:.1f}s")
 
     if df.empty:
         log_error("No data found in daily_prices")
@@ -299,7 +323,7 @@ def run_feature_pipeline(num_workers=8):
         return
 
     num_tickers = df['ticker'].nunique()
-    log_info(f"Processing {num_tickers} tickers ({num_workers} workers)...")
+    log_info(f"Processing {num_tickers} tickers with {num_workers} workers...")
 
     # -------------------------
     # SPLIT BY TICKER
@@ -307,29 +331,57 @@ def run_feature_pipeline(num_workers=8):
     ticker_groups = [group for _, group in df.groupby("ticker")]
 
     # -------------------------
-    # PARALLEL FEATURE COMPUTATION WITH ERROR HANDLING
+    # PARALLEL FEATURE COMPUTATION WITH PROGRESS TRACKING
     # -------------------------
     all_results = []
     failed_tickers = []
     successful_tickers = []
     
-    with Pool(num_workers) as pool:
-        results = pool.map(compute_ticker_features, ticker_groups)
+    process_start = time.perf_counter()
+    
+    try:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            futures = {executor.submit(compute_ticker_features, group): group['ticker'].iloc[0] 
+                      for group in ticker_groups}
+            
+            # Process results as they complete (with progress tracking)
+            completed = 0
+            for future in as_completed(futures):
+                ticker = futures[future]
+                try:
+                    result_df, ticker_name, error = future.result()
+                    completed += 1
+                    
+                    if error:
+                        failed_tickers.append((ticker_name, error))
+                        if completed % 50 == 0:  # Log progress every 50 tickers
+                            log_info(f"  Progress: {completed}/{num_tickers} ({completed/num_tickers*100:.0f}%)")
+                    else:
+                        all_results.append(result_df)
+                        successful_tickers.append(ticker_name)
+                        if completed % 50 == 0:
+                            log_info(f"  Progress: {completed}/{num_tickers} ({completed/num_tickers*100:.0f}%)")
+                        
+                except Exception as e:
+                    failed_tickers.append((ticker, f"Processing error: {str(e)}"))
+                    completed += 1
+                    
+    except Exception as e:
+        log_exception(e, "Parallel processing failed")
+        conn.close()
+        return
 
-    for result_df, ticker, error in results:
-        if error:
-            failed_tickers.append((ticker, error))
-        else:
-            all_results.append(result_df)
-            successful_tickers.append(ticker)
-
+    process_time = time.perf_counter() - process_start
+    log_info(f"Feature computation: {process_time:.1f}s ({num_tickers/process_time:.1f} tickers/sec)")
     log_info(f"Success: {len(successful_tickers)}/{num_tickers} | Failed: {len(failed_tickers)}")
 
     if failed_tickers:
-        for ticker, error in failed_tickers[:5]:  # Show first 5 errors
+        log_warning(f"Failed tickers ({len(failed_tickers)}):")
+        for ticker, error in failed_tickers[:10]:  # Show first 10 errors
             log_warning(f"  {ticker}: {error}")
-        if len(failed_tickers) > 5:
-            log_warning(f"  ... and {len(failed_tickers)-5} more")
+        if len(failed_tickers) > 10:
+            log_warning(f"  ... and {len(failed_tickers)-10} more")
 
     if not all_results:
         log_error("No valid features generated")
@@ -339,12 +391,40 @@ def run_feature_pipeline(num_workers=8):
     # -------------------------
     # COMBINE RESULTS (already in wide format)
     # -------------------------
+    log_info("Combining results...")
+    combine_start = time.perf_counter()
     df_feat = pd.concat(all_results, ignore_index=True)
+    combine_time = time.perf_counter() - combine_start
 
     # rename date → report_date
     df_feat = df_feat.rename(columns={"date": "report_date"})
 
-    log_info(f"Generated {len(df_feat)} feature rows ({df_feat['ticker'].nunique()} tickers) with {len(df_feat.columns)-3} features")
+    # -------------------------
+    # DATA QUALITY CHECKS
+    # -------------------------
+    feature_cols = [col for col in df_feat.columns if col not in ['ticker', 'report_date', 'close', 'volume']]
+    initial_rows = len(df_feat)
+    
+    # Count NaN values per row
+    nan_counts = df_feat[feature_cols].isna().sum(axis=1)
+    nan_ratio = nan_counts / len(feature_cols)
+    
+    # Filter rows with too many NaN features
+    valid_mask = nan_ratio <= MAX_NAN_RATIO
+    rows_dropped = (~valid_mask).sum()
+    
+    if rows_dropped > 0:
+        df_feat = df_feat[valid_mask].reset_index(drop=True)
+        log_info(f"Dropped {rows_dropped:,} rows with >{MAX_NAN_RATIO*100:.0f}% NaN features ({rows_dropped/initial_rows*100:.1f}%)")
+
+    log_info(f"Generated {len(df_feat):,} feature rows ({df_feat['ticker'].nunique()} tickers) with {len(feature_cols)} features")
+    log_info(f"  Combine time: {combine_time:.1f}s")
+    
+    # Log feature NaN statistics
+    nan_pct = df_feat[feature_cols].isna().mean() * 100
+    if nan_pct.max() > 0:
+        worst_features = nan_pct.nlargest(5)
+        log_info(f"  Top NaN features: {', '.join([f'{col}({pct:.1f}%)' for col, pct in worst_features.items()])}")
 
     # -------------------------
     # WRITE TO PARQUET (Fast, compressed storage via DuckDB)
@@ -353,27 +433,55 @@ def run_feature_pipeline(num_workers=8):
     raw_cols = ["open", "high", "low", "adj_close"]
     df_feat = df_feat.drop(columns=raw_cols, errors="ignore")
     
+    log_info(f"Writing to parquet...")
     write_start = time.perf_counter()
     # Use DuckDB to write parquet (10x faster than pandas.to_parquet for large datasets)
     conn.execute(f"COPY df_feat TO '{FEATURES_PATH}' (FORMAT PARQUET, COMPRESSION 'snappy')")
     write_time = time.perf_counter() - write_start
 
+    file_size_mb = FEATURES_PATH.stat().st_size / (1024 * 1024)
+    
     conn.close()
 
-    log_info(f"Parquet write time: {write_time:.2f}s ({len(df_feat)/write_time:,.0f} rows/sec)")
+    log_info(f"Parquet write: {write_time:.1f}s ({len(df_feat)/write_time:,.0f} rows/sec)")
+    log_info(f"File size: {file_size_mb:.1f} MB")
     log_info(f"Features saved to: {FEATURES_PATH}")
+    
+    # -------------------------
+    # FINAL METRICS
+    # -------------------------
+    total_time = time.perf_counter() - load_start
+    log_metrics({
+        "Total Time": f"{total_time:.1f}s",
+        "Tickers Processed": f"{len(successful_tickers)}/{num_tickers}",
+        "Feature Rows": f"{len(df_feat):,}",
+        "Features": len(feature_cols),
+        "File Size": f"{file_size_mb:.1f} MB"
+    })
 
 # =========================================================
 # RUN
 # =========================================================
 
 if __name__ == "__main__":
-    log_pipeline_start("Feature Engine", tickers="all")
+    import argparse
+    import os
+    
+    parser = argparse.ArgumentParser(description="Stock feature engineering pipeline")
+    parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 4), 
+                       help="Number of parallel workers (default: min(8, CPU count))")
+    args = parser.parse_args()
+    
+    log_pipeline_start("Feature Engine", tickers="all", workers=args.workers)
+    
     try:
-        # Use 8 workers (adjust based on your CPU cores)
-        # Recommended: num_workers = os.cpu_count() or 8
-        run_feature_pipeline(num_workers=8)
+        run_feature_pipeline(num_workers=args.workers)
         log_pipeline_end("Feature Engine", status="SUCCESS")
+    except KeyboardInterrupt:
+        log_warning("Pipeline interrupted by user")
+        log_pipeline_end("Feature Engine", status="INTERRUPTED")
+        sys.exit(1)
     except Exception as e:
         log_exception(e, "Feature Engine failed")
         log_pipeline_end("Feature Engine", status="FAILED")
+        sys.exit(1)
