@@ -13,6 +13,7 @@ import traceback
 import time
 import sys
 import os
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 from logger_config import (
@@ -316,11 +317,15 @@ def run_feature_pipeline(num_workers=8):
     # SELECT EXECUTOR (Platform-specific optimization)
     # -------------------------
     if sys.platform == 'win32':
+        executor_kwargs = {"max_workers": num_workers}
         executor_class = ThreadPoolExecutor
         executor_type = "Threading"
     else:
+        # Use 'spawn' instead of default 'fork' to avoid DuckDB/numpy global state corruption
+        mp_context = multiprocessing.get_context('spawn')
+        executor_kwargs = {"max_workers": num_workers, "mp_context": mp_context}
         executor_class = ProcessPoolExecutor
-        executor_type = "Multiprocessing"
+        executor_type = "Multiprocessing (spawn)"
     
     log_info(f"Processing {num_tickers} tickers ({total_rows:,} rows) with {num_workers} workers ({executor_type})...")
 
@@ -339,7 +344,7 @@ def run_feature_pipeline(num_workers=8):
     process_start = load_start
     
     try:
-        with executor_class(max_workers=num_workers) as executor:
+        with executor_class(**executor_kwargs) as executor:
             # Submit all tasks as (ticker, db_path) tuples - no large DataFrame passing
             futures = {executor.submit(compute_ticker_features, args): args[0]
                       for args in task_args}
