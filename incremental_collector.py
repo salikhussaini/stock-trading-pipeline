@@ -28,10 +28,10 @@ from logger_config import (
 
 def get_last_trading_day():
     """
-    Returns the last trading day (skips weekends/holidays).
-    If today is a weekend, returns the last Friday.
+    Returns the last COMPLETE trading day (skips weekends/holidays).
+    Subtracts 1 day first to avoid requesting incomplete intraday data.
     """
-    today = datetime.today().date()
+    today = datetime.today().date() - timedelta(days=1)  # Go back 1 day to ensure complete data
     # Weekday: 0=Mon, 1=Tue, ..., 5=Sat, 6=Sun
     while today.weekday() > 4:  # Skip Saturday (5) and Sunday (6)
         today -= timedelta(days=1)
