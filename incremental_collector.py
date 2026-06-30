@@ -23,6 +23,21 @@ from logger_config import (
 )
 
 # =========================================================
+# HELPERS
+# =========================================================
+
+def get_last_trading_day():
+    """
+    Returns the last trading day (skips weekends/holidays).
+    If today is a weekend, returns the last Friday.
+    """
+    today = datetime.today().date()
+    # Weekday: 0=Mon, 1=Tue, ..., 5=Sat, 6=Sun
+    while today.weekday() > 4:  # Skip Saturday (5) and Sunday (6)
+        today -= timedelta(days=1)
+    return today
+
+# =========================================================
 # CONFIG
 # =========================================================
 
@@ -237,7 +252,7 @@ def process_ticker(ticker):
                 # ld is already a date object from the database
                 start_date = ld + timedelta(days=1)
 
-        end_date = datetime.today().date()
+        end_date = get_last_trading_day()
 
         if start_date >= end_date:
             conn.close()
