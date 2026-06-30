@@ -6,8 +6,6 @@
 # =========================================================
 
 from pathlib import Path
-from multiprocessing import Pool
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import duckdb
 import pandas as pd
 import numpy as np
@@ -15,11 +13,7 @@ import traceback
 import time
 import sys
 import os
-
-# Ensure multiprocessing works on Windows
-if sys.platform == 'win32':
-    import multiprocessing
-    multiprocessing.freeze_support()
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 from logger_config import (
     log_info, log_error, log_exception, log_warning,
@@ -290,6 +284,8 @@ def run_feature_pipeline(num_workers=8):
     """
     Run feature engineering pipeline with parallel processing.
     Each worker processes features for one ticker at a time.
+    Uses ProcessPoolExecutor on Linux/Mac (true multiprocessing via fork).
+    Uses ThreadPoolExecutor on Windows (avoids pickling issues).
     """
     conn = duckdb.connect(str(DB_PATH))
 
@@ -323,7 +319,18 @@ def run_feature_pipeline(num_workers=8):
         return
 
     num_tickers = df['ticker'].nunique()
-    log_info(f"Processing {num_tickers} tickers with {num_workers} workers...")
+    
+    # -------------------------
+    # SELECT EXECUTOR (Platform-specific optimization)
+    # -------------------------
+    if sys.platform == 'win32':
+        executor_class = ThreadPoolExecutor
+        executor_type = "Threading"
+    else:
+        executor_class = ProcessPoolExecutor
+        executor_type = "Multiprocessing"
+    
+    log_info(f"Processing {num_tickers} tickers with {num_workers} workers ({executor_type})...")
 
     # -------------------------
     # SPLIT BY TICKER
@@ -340,7 +347,7 @@ def run_feature_pipeline(num_workers=8):
     process_start = time.perf_counter()
     
     try:
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with executor_class(max_workers=num_workers) as executor:
             # Submit all tasks
             futures = {executor.submit(compute_ticker_features, group): group['ticker'].iloc[0] 
                       for group in ticker_groups}
@@ -465,7 +472,6 @@ def run_feature_pipeline(num_workers=8):
 
 if __name__ == "__main__":
     import argparse
-    import os
     
     parser = argparse.ArgumentParser(description="Stock feature engineering pipeline")
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 4), 
