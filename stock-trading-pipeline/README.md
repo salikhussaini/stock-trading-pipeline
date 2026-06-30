@@ -70,17 +70,23 @@ stock-trading-pipeline/
 │   ├── LICENSE
 │   └── [more docs...]
 │
-├── Core Pipeline:
-├── incremental_collector.py        (download stock data, 8 threads)
-├── feature_engine.py               (compute 46+ indicators, 8 workers)
-├── backtester.py                   (evaluate 28 strategies, 8 workers)
-├── query_backtest_results.py       (analyze results)
-├── logger_config.py                (centralized logging)
+├── Core Pipeline Scripts:
+│   ├── incremental_collector.py    (download stock data, 8 threads)
+│   ├── feature_engine.py           (compute 46+ indicators, 8 workers)
+│   ├── backtester.py               (evaluate 28 strategies, 8 workers)
+│   ├── query_backtest_results.py   (analyze results)
+│   └── logger_config.py            (centralized logging)
 │
-├── Configuration:
-├── requirements.txt                (Python dependencies)
-├── tickers.csv                     (S&P 500 symbols)
+├── Configuration Files:
+│   ├── requirements.txt            (Python dependencies)
+│   ├── tickers.csv                 (S&P 500 symbols)
+│   ├── run_pipeline.sh             (execute all 3 stages - Unix/Linux)
+│   └── run_pipeline.ps1            (execute all 3 stages - Windows)
+│
 └── database/                       (git-ignored, auto-created)
+    ├── stock_data.duckdb          (raw data, features, cache)
+    └── stock_features.parquet     (computed technical indicators)
+```
 
 | Category | Strategies |
 |----------|------------|
