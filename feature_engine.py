@@ -281,7 +281,7 @@ def compute_ticker_features(args: tuple) -> tuple:
 # MAIN PIPELINE (PARALLEL BY TICKER)
 # =========================================================
 
-def run_feature_pipeline(num_workers=8):
+def run_feature_pipeline(num_workers=8, force=False):
     """
     Run feature engineering pipeline with parallel processing.
     Each worker loads its own data from DuckDB and computes features independently.
@@ -301,6 +301,25 @@ def run_feature_pipeline(num_workers=8):
 
     tickers = [row[0] for row in conn.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker").fetchall()]
     total_rows = conn.execute("SELECT COUNT(*) FROM daily_prices").fetchone()[0]
+    latest_price_date = conn.execute("SELECT MAX(date) FROM daily_prices").fetchone()[0]
+
+    # -------------------------
+    # FRESHNESS CHECK — skip if features already up to date
+    # -------------------------
+    if not force and FEATURES_PATH.exists():
+        try:
+            check_conn = duckdb.connect()
+            latest_feature_date = check_conn.execute(
+                f"SELECT MAX(report_date) FROM read_parquet('{FEATURES_PATH}')"
+            ).fetchone()[0]
+            check_conn.close()
+            if latest_feature_date and str(latest_feature_date) >= str(latest_price_date):
+                log_info(f"Features already up to date (latest: {latest_feature_date}). Skipping.")
+                conn.close()
+                return
+            log_info(f"Features outdated (features: {latest_feature_date}, prices: {latest_price_date}). Regenerating...")
+        except Exception:
+            pass  # If check fails, proceed with regeneration
 
     log_info(f"Loading {total_rows:,} rows for {len(tickers)} tickers...")
     load_start = time.perf_counter()
@@ -476,12 +495,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stock feature engineering pipeline")
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 4), 
                        help="Number of parallel workers (default: min(8, CPU count))")
+    parser.add_argument("--force", action="store_true",
+                       help="Regenerate features even if already up to date")
     args = parser.parse_args()
     
     log_pipeline_start("Feature Engine", tickers="all", workers=args.workers)
     
     try:
-        run_feature_pipeline(num_workers=args.workers)
+        run_feature_pipeline(num_workers=args.workers, force=args.force)
         log_pipeline_end("Feature Engine", status="SUCCESS")
     except KeyboardInterrupt:
         log_warning("Pipeline interrupted by user")
