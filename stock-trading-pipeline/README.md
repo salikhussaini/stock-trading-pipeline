@@ -14,15 +14,11 @@ A production-grade Python system for analyzing stock market data with technical 
 **Results:**
 - ✅ 13,972 backtest tests (28 strategies × 499 tickers) completed
 - 🏆 Top strategy: **roc_filter** (Sharpe ratio 1.973)
-<<<<<<< HEAD
 
 **Execution Times (8 workers):**
 - Data download: 2-3 min (first run), 30s (incremental)
 - Feature generation: 55s (2.89M rows × 73 columns)
 - Backtesting: ~2.5 hours (full run) | ~30-60s (test mode, 280 tests)
-=======
-- ⏱️ Performance: Feature gen 55s, Backtest ~2.5h (8 workers)
->>>>>>> 68370ecb3dcbdf99957bc8a13c0a57e04d3f32a0
 
 ## Quick Start
 
@@ -30,7 +26,6 @@ A production-grade Python system for analyzing stock market data with technical 
 # 1. Install
 pip install -r requirements.txt
 
-<<<<<<< HEAD
 # 2. Run complete pipeline (all 3 steps sequentially)
 # On macOS/Linux:
 bash run_pipeline.sh
@@ -44,18 +39,6 @@ python feature_engine.py                  # Generate features
 python backtester.py --limit 10          # Backtest strategies
 
 # 3. Analyze results
-=======
-# 2. Download data (test mode)
-python incremental_collector.py --test
-
-# 3. Generate features
-python feature_engine.py
-
-# 4. Backtest strategies
-python backtester.py --limit 10
-
-# 5. Analyze results
->>>>>>> 68370ecb3dcbdf99957bc8a13c0a57e04d3f32a0
 python query_backtest_results.py
 ```
 
@@ -87,7 +70,6 @@ stock-trading-pipeline/
 │   ├── LICENSE
 │   └── [more docs...]
 │
-<<<<<<< HEAD
 ├── Core Pipeline Scripts:
 │   ├── incremental_collector.py    (download stock data, 8 threads)
 │   ├── feature_engine.py           (compute 46+ indicators, 8 workers)
@@ -105,19 +87,6 @@ stock-trading-pipeline/
     ├── stock_data.duckdb          (raw data, features, cache)
     └── stock_features.parquet     (computed technical indicators)
 ```
-=======
-├── Core Pipeline:
-├── incremental_collector.py        (download stock data, 8 threads)
-├── feature_engine.py               (compute 46+ indicators, 8 workers)
-├── backtester.py                   (evaluate 28 strategies, 8 workers)
-├── query_backtest_results.py       (analyze results)
-├── logger_config.py                (centralized logging)
-│
-├── Configuration:
-├── requirements.txt                (Python dependencies)
-├── tickers.csv                     (S&P 500 symbols)
-└── database/                       (git-ignored, auto-created)
->>>>>>> 68370ecb3dcbdf99957bc8a13c0a57e04d3f32a0
 
 | Category | Strategies |
 |----------|------------|
@@ -311,7 +280,6 @@ LIMIT 20;
 
 ## Performance
 
-<<<<<<< HEAD
 Complete execution times from full pipeline run on standard hardware (8 CPU cores):
 
 ### Download Performance (incremental_collector.py)
@@ -337,26 +305,6 @@ Complete execution times from full pipeline run on standard hardware (8 CPU core
 - **Incremental run**: ~3 hours (features + backtest only, data is incremental)
 - **Test run (10 tickers)**: ~1-2 minutes
 
-=======
-### Download Performance (incremental_collector.py)
-- **Rate**: ~3,000-5,000 rows/second with 8 workers
-- **API delay**: 0.2s-3.0s (adaptive throttle based on success/failure)
-- **Full S&P 500**: ~2-3 minutes for ~500K rows (first run)
-- **Incremental updates**: ~30 seconds for ~5K new rows
-
-### Feature Computation (feature_engine.py)
-- **Rate**: ~60,000 rows/second I/O throughput
-- **Full S&P 500**: ~2 minutes for feature computation + insert
-- **Parallelism**: 8 workers (multiprocessing), CPU-bound operations
-
-### Backtesting (backtester.py)
-- **Rate**: ~50-150 tests/second with 8 workers (varies by strategy complexity)
-- **Full 28 strategies × 10 tickers (280 tests)**: ~30-60 seconds with caching
-- **Caching benefit**: Subsequent runs with same strategy-ticker pairs skip computation
-- **Parallelism**: 8 workers (multiprocessing), CPU-bound simulation
-- **Memory**: ~100-200 MB per worker process
-
->>>>>>> 68370ecb3dcbdf99957bc8a13c0a57e04d3f32a0
 ### Storage
 - **daily_prices**: ~2-3 GB for 20 years × 500 stocks
 - **stock_features**: ~4-5 GB (46 features per row)
