@@ -334,9 +334,9 @@ def run_feature_pipeline(num_workers=8):
     log_info(f"Processing {num_tickers} tickers with {num_workers} workers ({executor_type})...")
 
     # -------------------------
-    # SPLIT BY TICKER
+    # SPLIT BY TICKER (Make independent copies for multiprocessing)
     # -------------------------
-    ticker_groups = [group for _, group in df.groupby("ticker")]
+    ticker_groups = [group.copy() for _, group in df.groupby("ticker")]
 
     # -------------------------
     # PARALLEL FEATURE COMPUTATION WITH PROGRESS TRACKING
