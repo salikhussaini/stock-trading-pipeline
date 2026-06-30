@@ -96,21 +96,28 @@ def adx(high, low, close, period=14):
 # FEATURE ENGINEERING FOR SINGLE TICKER (Worker Function)
 # =========================================================
 
-def compute_ticker_features(ticker_data: pd.DataFrame) -> tuple:
+def compute_ticker_features(args: tuple) -> tuple:
     """
-    Compute all features for a single ticker's data.
-    Returns features in WIDE FORMAT (one row per ticker-date, 70+ feature columns).
-    Worker function for parallel processing.
+    Compute all features for a single ticker.
+    Loads data directly from DuckDB to avoid passing large DataFrames across processes.
     Returns (DataFrame, ticker, error_msg or None)
     """
+    ticker, db_path = args
     try:
-        ticker = ticker_data["ticker"].iloc[0]
-        
+        conn = duckdb.connect(db_path, read_only=True)
+        ticker_data = conn.execute("""
+            SELECT ticker, date, open, high, low, close, adj_close, volume
+            FROM daily_prices
+            WHERE ticker = ?
+            ORDER BY date
+        """, [ticker]).df()
+        conn.close()
+
         # Skip if insufficient data
         if len(ticker_data) < MIN_DATA_POINTS:
             return None, ticker, f"Insufficient data ({len(ticker_data)} rows < {MIN_DATA_POINTS})"
         
-        ticker_data = ticker_data.sort_values("date").reset_index(drop=True)
+        ticker_data = ticker_data.reset_index(drop=True)
         
         # Remove outliers (close > 3 std from mean)
         close_mean = ticker_data["close"].mean()
@@ -284,7 +291,7 @@ def compute_ticker_features(ticker_data: pd.DataFrame) -> tuple:
 def run_feature_pipeline(num_workers=8):
     """
     Run feature engineering pipeline with parallel processing.
-    Each worker processes features for one ticker at a time.
+    Each worker loads its own data from DuckDB and computes features independently.
     Uses ProcessPoolExecutor on Linux/Mac (true multiprocessing via fork).
     Uses ThreadPoolExecutor on Windows (avoids pickling issues).
     """
@@ -299,27 +306,11 @@ def run_feature_pipeline(num_workers=8):
         conn.close()
         return
 
-    # -------------------------
-    # LOAD RAW DATA
-    # -------------------------
-    log_info(f"Loading data for {ticker_count} tickers...")
-    load_start = time.perf_counter()
-    
-    df = conn.execute("""
-        SELECT ticker, date, open, high, low, close, adj_close, volume
-        FROM daily_prices
-        ORDER BY ticker, date
-    """).df()
+    tickers = [row[0] for row in conn.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker").fetchall()]
+    total_rows = conn.execute("SELECT COUNT(*) FROM daily_prices").fetchone()[0]
+    conn.close()
 
-    load_time = time.perf_counter() - load_start
-    log_info(f"Data loaded: {len(df):,} rows in {load_time:.1f}s")
-
-    if df.empty:
-        log_error("No data found in daily_prices")
-        conn.close()
-        return
-
-    num_tickers = df['ticker'].nunique()
+    num_tickers = len(tickers)
     
     # -------------------------
     # SELECT EXECUTOR (Platform-specific optimization)
@@ -331,27 +322,27 @@ def run_feature_pipeline(num_workers=8):
         executor_class = ProcessPoolExecutor
         executor_type = "Multiprocessing"
     
-    log_info(f"Processing {num_tickers} tickers with {num_workers} workers ({executor_type})...")
-
-    # -------------------------
-    # SPLIT BY TICKER (Make independent copies for multiprocessing)
-    # -------------------------
-    ticker_groups = [group.copy() for _, group in df.groupby("ticker")]
+    log_info(f"Processing {num_tickers} tickers ({total_rows:,} rows) with {num_workers} workers ({executor_type})...")
 
     # -------------------------
     # PARALLEL FEATURE COMPUTATION WITH PROGRESS TRACKING
+    # Workers load their own data from DuckDB (avoids forking large DataFrames)
     # -------------------------
+    db_path = str(DB_PATH)
+    task_args = [(ticker, db_path) for ticker in tickers]
+
     all_results = []
     failed_tickers = []
     successful_tickers = []
     
-    process_start = time.perf_counter()
+    load_start = time.perf_counter()
+    process_start = load_start
     
     try:
         with executor_class(max_workers=num_workers) as executor:
-            # Submit all tasks
-            futures = {executor.submit(compute_ticker_features, group): group['ticker'].iloc[0] 
-                      for group in ticker_groups}
+            # Submit all tasks as (ticker, db_path) tuples - no large DataFrame passing
+            futures = {executor.submit(compute_ticker_features, args): args[0]
+                      for args in task_args}
             
             # Process results as they complete (with progress tracking)
             completed = 0
@@ -458,7 +449,7 @@ def run_feature_pipeline(num_workers=8):
     # -------------------------
     # FINAL METRICS
     # -------------------------
-    total_time = time.perf_counter() - load_start
+    total_time = time.perf_counter() - process_start
     log_metrics({
         "Total Time": f"{total_time:.1f}s",
         "Tickers Processed": f"{len(successful_tickers)}/{num_tickers}",
