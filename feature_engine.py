@@ -47,6 +47,52 @@ MAX_NAN_RATIO = 0.3  # Drop rows where >30% of features are NaN
 # =========================================================
 
 # =========================================================
+# HELPER FUNCTIONS (Module-level for multiprocessing compatibility)
+# =========================================================
+
+def rsi(series, period=14):
+    """Compute Relative Strength Index"""
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
+
+def stochastic(high, low, close, period=14):
+    """Compute Stochastic Oscillator %K"""
+    lowest_low = low.rolling(period).min()
+    highest_high = high.rolling(period).max()
+    k = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-9)
+    return k
+
+def atr(high, low, close, period=14):
+    """Compute Average True Range"""
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+def adx(high, low, close, period=14):
+    """Compute Average Directional Index (trend strength)"""
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = (-low.diff()).clip(lower=0)
+    plus_dm = plus_dm.where(plus_dm > minus_dm, 0)
+    minus_dm = minus_dm.where(minus_dm > plus_dm, 0)
+    
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_val = tr.rolling(period).mean()
+    
+    plus_di = 100 * plus_dm.rolling(period).mean() / (atr_val + 1e-9)
+    minus_di = 100 * minus_dm.rolling(period).mean() / (atr_val + 1e-9)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+    adx_val = dx.rolling(period).mean()
+    return adx_val
+
+# =========================================================
 # FEATURE ENGINEERING FOR SINGLE TICKER (Worker Function)
 # =========================================================
 
@@ -72,51 +118,6 @@ def compute_ticker_features(ticker_data: pd.DataFrame) -> tuple:
         mask = (ticker_data["close"] - close_mean).abs() <= 3 * close_std
         if not mask.all():
             ticker_data = ticker_data[mask].reset_index(drop=True)
-
-        # =========================================================
-        # HELPER FUNCTIONS
-        # =========================================================
-        def rsi(series, period=14):
-            """Compute Relative Strength Index"""
-            delta = series.diff()
-            gain = delta.clip(lower=0).rolling(period).mean()
-            loss = (-delta.clip(upper=0)).rolling(period).mean()
-            rs = gain / (loss + 1e-9)
-            return 100 - (100 / (1 + rs))
-
-        def stochastic(high, low, close, period=14):
-            """Compute Stochastic Oscillator %K"""
-            lowest_low = low.rolling(period).min()
-            highest_high = high.rolling(period).max()
-            k = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-9)
-            return k
-
-        def atr(high, low, close, period=14):
-            """Compute Average True Range"""
-            tr1 = high - low
-            tr2 = (high - close.shift()).abs()
-            tr3 = (low - close.shift()).abs()
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            return tr.rolling(period).mean()
-
-        def adx(high, low, close, period=14):
-            """Compute Average Directional Index (trend strength)"""
-            plus_dm = high.diff().clip(lower=0)
-            minus_dm = (-low.diff()).clip(lower=0)
-            plus_dm = plus_dm.where(plus_dm > minus_dm, 0)
-            minus_dm = minus_dm.where(minus_dm > plus_dm, 0)
-            
-            tr1 = high - low
-            tr2 = (high - close.shift()).abs()
-            tr3 = (low - close.shift()).abs()
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr_val = tr.rolling(period).mean()
-            
-            plus_di = 100 * plus_dm.rolling(period).mean() / (atr_val + 1e-9)
-            minus_di = 100 * minus_dm.rolling(period).mean() / (atr_val + 1e-9)
-            dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
-            adx_val = dx.rolling(period).mean()
-            return adx_val
 
         # =========================================================
         # SHORT-TERM INDICATORS (1-14 day lookback)
