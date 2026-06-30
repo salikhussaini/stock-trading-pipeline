@@ -22,9 +22,7 @@ from logger_config import (
     log_section, log_pipeline_start, log_pipeline_end, log_metrics
 )
 
-# =========================================================
-<<<<<<< HEAD
-=======
+# ================================================================
 # HELPERS
 # =========================================================
 
@@ -40,7 +38,6 @@ def get_last_trading_day():
     return today
 
 # =========================================================
->>>>>>> 68370ecb3dcbdf99957bc8a13c0a57e04d3f32a0
 # CONFIG
 # =========================================================
 
@@ -255,11 +252,8 @@ def process_ticker(ticker):
                 # ld is already a date object from the database
                 start_date = ld + timedelta(days=1)
 
-<<<<<<< HEAD
         end_date = datetime.today().date()
-=======
         end_date = get_last_trading_day()
->>>>>>> 68370ecb3dcbdf99957bc8a13c0a57e04d3f32a0
 
         if start_date >= end_date:
             conn.close()
