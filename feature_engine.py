@@ -100,25 +100,18 @@ def adx(high, low, close, period=14):
 def compute_ticker_features(args: tuple) -> tuple:
     """
     Compute all features for a single ticker.
-    Loads data directly from DuckDB to avoid passing large DataFrames across processes.
+    Receives pre-loaded DataFrame via IPC (no DuckDB access from workers).
     Returns (DataFrame, ticker, error_msg or None)
     """
-    ticker, db_path = args
+    ticker_data, ticker = args
     try:
-        conn = duckdb.connect(db_path, read_only=True)
-        ticker_data = conn.execute("""
-            SELECT ticker, date, open, high, low, close, adj_close, volume
-            FROM daily_prices
-            WHERE ticker = ?
-            ORDER BY date
-        """, [ticker]).df()
-        conn.close()
-
         # Skip if insufficient data
         if len(ticker_data) < MIN_DATA_POINTS:
             return None, ticker, f"Insufficient data ({len(ticker_data)} rows < {MIN_DATA_POINTS})"
         
         ticker_data = ticker_data.reset_index(drop=True)
+        
+        # Remove outliers (close > 3 std from mean)
         
         # Remove outliers (close > 3 std from mean)
         close_mean = ticker_data["close"].mean()
@@ -281,7 +274,6 @@ def compute_ticker_features(args: tuple) -> tuple:
         return ticker_data, ticker, None
 
     except Exception as e:
-        ticker = ticker_data["ticker"].iloc[0] if len(ticker_data) > 0 else "UNKNOWN"
         error_msg = f"{type(e).__name__}: {str(e)}"
         return None, ticker, error_msg
 
@@ -309,7 +301,17 @@ def run_feature_pipeline(num_workers=8):
 
     tickers = [row[0] for row in conn.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker").fetchall()]
     total_rows = conn.execute("SELECT COUNT(*) FROM daily_prices").fetchone()[0]
+
+    log_info(f"Loading {total_rows:,} rows for {len(tickers)} tickers...")
+    load_start = time.perf_counter()
+    df = conn.execute("""
+        SELECT ticker, date, open, high, low, close, adj_close, volume
+        FROM daily_prices
+        ORDER BY ticker, date
+    """).df()
     conn.close()
+    load_time = time.perf_counter() - load_start
+    log_info(f"Data loaded in {load_time:.1f}s")
 
     num_tickers = len(tickers)
     
@@ -331,10 +333,13 @@ def run_feature_pipeline(num_workers=8):
 
     # -------------------------
     # PARALLEL FEATURE COMPUTATION WITH PROGRESS TRACKING
-    # Workers load their own data from DuckDB (avoids forking large DataFrames)
+    # Data loaded once in main process, distributed to workers via IPC pickle.
+    # Each ticker's slice is small (~6K rows), so IPC overhead is minimal.
+    # DuckDB is NOT opened in workers — avoids concurrent access segfaults.
     # -------------------------
-    db_path = str(DB_PATH)
-    task_args = [(ticker, db_path) for ticker in tickers]
+    task_args = [(group.reset_index(drop=True), ticker)
+                 for ticker, group in df.groupby("ticker")]
+    del df  # Free memory before spawning workers
 
     all_results = []
     failed_tickers = []
@@ -373,7 +378,6 @@ def run_feature_pipeline(num_workers=8):
                     
     except Exception as e:
         log_exception(e, "Parallel processing failed")
-        conn.close()
         return
 
     process_time = time.perf_counter() - process_start
@@ -389,7 +393,6 @@ def run_feature_pipeline(num_workers=8):
 
     if not all_results:
         log_error("No valid features generated")
-        conn.close()
         return
 
     # -------------------------
@@ -439,13 +442,13 @@ def run_feature_pipeline(num_workers=8):
     
     log_info(f"Writing to parquet...")
     write_start = time.perf_counter()
-    # Use DuckDB to write parquet (10x faster than pandas.to_parquet for large datasets)
-    conn.execute(f"COPY df_feat TO '{FEATURES_PATH}' (FORMAT PARQUET, COMPRESSION 'snappy')")
+    # Open a fresh connection just for writing parquet
+    write_conn = duckdb.connect()
+    write_conn.execute(f"COPY df_feat TO '{FEATURES_PATH}' (FORMAT PARQUET, COMPRESSION 'snappy')")
+    write_conn.close()
     write_time = time.perf_counter() - write_start
 
     file_size_mb = FEATURES_PATH.stat().st_size / (1024 * 1024)
-    
-    conn.close()
 
     log_info(f"Parquet write: {write_time:.1f}s ({len(df_feat)/write_time:,.0f} rows/sec)")
     log_info(f"File size: {file_size_mb:.1f} MB")
