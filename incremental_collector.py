@@ -258,87 +258,84 @@ def process_ticker(ticker):
             conn.close()
             status = "SKIPPED"
             error = "Already up-to-date"
+            return  # Exit early - no download needed
+
+        # -------------------------
+        # ADAPTIVE THROTTLE
+        # -------------------------
+        with delay_lock:
+            delay = global_delay
+
+        time.sleep(delay + random.uniform(0.1, 0.5))
+
+        # -------------------------
+        # DOWNLOAD
+        # -------------------------
+        df = safe_yf_download(ticker, start_date, end_date)
+
+        if df is None or df.empty:
+            raise ValueError("download failed")
+
+        df = df.reset_index()
+
+        df.rename(columns={
+            "Date": "date",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Adj Close": "adj_close",
+            "Volume": "volume"
+        }, inplace=True)
+
+        df["ticker"] = ticker
+
+        df = df[
+            ["ticker", "date", "open", "high", "low", "close", "adj_close", "volume"]
+        ]
+
+        # -------------------------
+        # WRITE DATA: clear existing records for this ticker+date range then insert
+        # (using DuckDB append() for direct DataFrame insert)
+        min_date = df["date"].min()
+        max_date = df["date"].max()
+        conn.execute("""
+            DELETE FROM daily_prices WHERE ticker = ? AND date >= ? AND date <= ?
+        """, [ticker, min_date, max_date])
+
+        # Use DuckDB's append() for direct DataFrame insert (more reliable than register+SELECT)
+        conn.append("daily_prices", df)
+
+        rows = len(df)
+
+        # -------------------------
+        # UPDATE STATE
+        # -------------------------
+        # -------------------------
+        # TICKER STATE UPSERT
+        # -------------------------
+        last_date = df["date"].max()
+        # ensure last_date is a string/date
+        if isinstance(last_date, (datetime, date)):
+            last_date_val = last_date.strftime("%Y-%m-%d")
         else:
-            # -------------------------
-            # ADAPTIVE THROTTLE
-            # -------------------------
-            with delay_lock:
-                delay = global_delay
+            last_date_val = str(last_date)
 
-            time.sleep(delay + random.uniform(0.1, 0.5))
+        conn.execute("""
+            MERGE INTO ticker_state AS t
+            USING (SELECT ? AS ticker, ?::DATE AS last_date) AS s
+            ON t.ticker = s.ticker
+            WHEN MATCHED THEN UPDATE SET last_date = s.last_date
+            WHEN NOT MATCHED THEN INSERT (ticker, last_date) VALUES (s.ticker, s.last_date)
+        """, [ticker, last_date_val])
 
-            # -------------------------
-            # DOWNLOAD
-            # -------------------------
-            df = safe_yf_download(ticker, start_date, end_date)
+        conn.close()
 
-            if df is None or df.empty:
-                raise ValueError("download failed")
+        with metrics_lock:
+            success += 1
+            total_rows += rows
 
-            df = df.reset_index()
-
-            df.rename(columns={
-                "Date": "date",
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Adj Close": "adj_close",
-                "Volume": "volume"
-            }, inplace=True)
-
-            df["ticker"] = ticker
-
-            df = df[
-                ["ticker", "date", "open", "high", "low", "close", "adj_close", "volume"]
-            ]
-
-            # -------------------------
-            # WRITE DATA: clear existing records for this ticker+date range then insert
-            # (using DuckDB append() for direct DataFrame insert)
-            min_date = df["date"].min()
-            max_date = df["date"].max()
-            conn.execute("""
-                DELETE FROM daily_prices WHERE ticker = ? AND date >= ? AND date <= ?
-            """, [ticker, min_date, max_date])
-
-            # Use DuckDB's append() for direct DataFrame insert (more reliable than register+SELECT)
-            conn.append("daily_prices", df)
-
-            rows = len(df)
-
-            # -------------------------
-            # UPDATE STATE
-            # -------------------------
-            # -------------------------
-            # TICKER STATE UPSERT
-            # -------------------------
-            last_date = df["date"].max()
-            # ensure last_date is a string/date
-            if isinstance(last_date, (datetime, date)):
-                last_date_val = last_date.strftime("%Y-%m-%d")
-            else:
-                last_date_val = str(last_date)
-
-            conn.execute("""
-                MERGE INTO ticker_state AS t
-                USING (SELECT ? AS ticker, ?::DATE AS last_date) AS s
-                ON t.ticker = s.ticker
-                WHEN MATCHED THEN UPDATE SET last_date = s.last_date
-                WHEN NOT MATCHED THEN INSERT (ticker, last_date) VALUES (s.ticker, s.last_date)
-            """, [ticker, last_date_val])
-
-            conn.close()
-
-            with metrics_lock:
-                success += 1
-                total_rows += rows
-
-            decrease_delay()
-
-        # Close connection if it wasn't already closed
-        if conn and not conn.closed:
-            conn.close()
+        decrease_delay()
 
     except Exception as e:
 
