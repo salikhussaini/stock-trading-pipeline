@@ -179,37 +179,48 @@ overall_start = time.perf_counter()
 # SAFE DOWNLOAD
 # =========================================================
 def safe_yf_download(ticker, start, end, retries=3):
-
+    """
+    Download data from yfinance with intelligent fallback.
+    If end_date has no data, progressively search earlier dates.
+    """
     base_delay = 1.0
 
     # ensure start/end are strings in ISO format
     if isinstance(start, (datetime, date)):
         start = start.strftime("%Y-%m-%d")
     if isinstance(end, (datetime, date)):
-        end = end.strftime("%Y-%m-%d")
+        end_str = end.strftime("%Y-%m-%d")
+        end_date = end
+    else:
+        end_str = end
+        end_date = datetime.strptime(end, "%Y-%m-%d").date()
 
-    for i in range(retries):
+    current_end = end_date
+    search_limit = 30  # Don't search more than 30 days back
 
-        try:
-            df = yf.download(
-                ticker,
-                start=start,
-                end=end,
-                interval="1d",
-                auto_adjust=False,
-                progress=False,
-                threads=False
-            )
+    for attempt in range(search_limit):
+        for retry in range(retries):
+            try:
+                current_end_str = current_end.strftime("%Y-%m-%d")
+                df = yf.download(
+                    ticker,
+                    start=start,
+                    end=current_end_str,
+                    interval="1d",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False
+                )
 
-            if df is None or df.empty:
-                raise ValueError("empty response")
+                if df is not None and not df.empty:
+                    return df
 
-            return df
-
-        except Exception as e:
-            # wait then retry
-            time.sleep(base_delay * (2 ** i) + random.uniform(0, 0.5))
-
+            except Exception:
+                time.sleep(base_delay * (2 ** retry) + random.uniform(0, 0.5))
+        
+        # Try one day earlier
+        current_end -= timedelta(days=1)
+    
     return None
 
 # =========================================================
@@ -274,7 +285,28 @@ def process_ticker(ticker):
         df = safe_yf_download(ticker, start_date, end_date)
 
         if df is None or df.empty:
-            raise ValueError("download failed")
+            # Check what's already in the database
+            last_db_date = conn.execute("""
+                SELECT MAX(date) FROM daily_prices WHERE ticker = ?
+            """, [ticker]).fetchone()
+            
+            last_db_date_val = last_db_date[0] if last_db_date and last_db_date[0] else None
+            
+            conn.close()
+            status = "SKIPPED"
+            
+            if last_db_date_val:
+                # We have historical data - check how recent
+                if isinstance(last_db_date_val, datetime):
+                    last_db_date_val = last_db_date_val.date()
+                
+                days_gap = (end_date - last_db_date_val).days
+                error = f"No new data available (DB has data through {last_db_date_val}, gap: {days_gap} days)"
+            else:
+                error = f"No data available (requested: {start_date} to {end_date})"
+            
+            log_warning(f"{ticker} | {status} | {error}")
+            return  # Exit early - no data to process
 
         df = df.reset_index()
 
