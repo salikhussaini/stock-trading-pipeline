@@ -10,6 +10,9 @@ import time
 import random
 import queue
 import threading
+import sys
+from io import StringIO
+import contextlib
 
 import duckdb
 import pandas as pd
@@ -202,15 +205,18 @@ def safe_yf_download(ticker, start, end, retries=3):
         for retry in range(retries):
             try:
                 current_end_str = current_end.strftime("%Y-%m-%d")
-                df = yf.download(
-                    ticker,
-                    start=start,
-                    end=current_end_str,
-                    interval="1d",
-                    auto_adjust=False,
-                    progress=False,
-                    threads=False
-                )
+                
+                # Suppress yfinance stdout/stderr
+                with contextlib.redirect_stdout(StringIO()), contextlib.redirect_stderr(StringIO()):
+                    df = yf.download(
+                        ticker,
+                        start=start,
+                        end=current_end_str,
+                        interval="1d",
+                        auto_adjust=False,
+                        progress=False,
+                        threads=False
+                    )
 
                 if df is not None and not df.empty:
                     return df
