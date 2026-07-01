@@ -98,6 +98,14 @@ def get_strategy_summary():
 # TELEGRAM FUNCTIONS
 # =========================================================
 
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Telegram Markdown."""
+    # Characters that need escaping in Telegram Markdown
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 def send_telegram_message(message: str):
     """Send a message to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -124,6 +132,12 @@ def send_telegram_message(message: str):
         return True
     except requests.exceptions.RequestException as e:
         print(f"❌ Failed to send Telegram message: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response content: {e.response.text}")
+        print("\nMessage that failed to send:")
+        print("=" * 60)
+        print(message)
+        print("=" * 60)
         return False
 
 # =========================================================
@@ -139,19 +153,23 @@ def format_sell_alert(df: pd.DataFrame) -> str:
     message += f"_{timestamp}_\n\n"
     
     if df.empty:
-        message += "No strong sell signals at this time.\n"
+        message += "No strong sell signals at this time\\.\n"
         return message
     
     message += f"Top {len(df)} stocks with strong sell signals:\n\n"
     
     for idx, row in df.iterrows():
-        message += f"*{row['ticker']}* | {row['strategy_name']}\n"
+        # Escape special characters in variable data
+        ticker = escape_markdown(str(row['ticker']))
+        strategy = escape_markdown(str(row['strategy_name']))
+        
+        message += f"*{ticker}* \\| {strategy}\n"
         message += f"  • Return: {row['return_pct']}%\n"
-        message += f"  • Sharpe: {row['sharpe']} | Win: {row['win_rate_pct']}%\n"
-        message += f"  • Trades: {row['num_trades']} | Avg P&L: ${row['avg_pnl']}\n"
+        message += f"  • Sharpe: {row['sharpe']} \\| Win: {row['win_rate_pct']}%\n"
+        message += f"  • Trades: {row['num_trades']} \\| Avg P&L: ${row['avg_pnl']}\n"
         message += f"  • Max Loss: {row['max_loss']}%\n\n"
     
-    message += "⚠️ _This is algorithmic analysis, not financial advice._"
+    message += "⚠️ _This is algorithmic analysis, not financial advice\\._"
     
     return message
 
@@ -166,8 +184,9 @@ def format_strategy_summary(df: pd.DataFrame) -> str:
     message += "Top 5 strategies by Sharpe ratio:\n\n"
     
     for idx, row in df.iterrows():
-        message += f"{idx+1}. *{row['strategy_name']}*\n"
-        message += f"   Sharpe: {row['avg_sharpe']} | Return: {row['avg_return']}%\n"
+        strategy = escape_markdown(str(row['strategy_name']))
+        message += f"{idx+1}\\. *{strategy}*\n"
+        message += f"   Sharpe: {row['avg_sharpe']} \\| Return: {row['avg_return']}%\n"
         message += f"   Tickers: {row['ticker_count']}\n\n"
     
     return message
