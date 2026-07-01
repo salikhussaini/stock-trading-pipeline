@@ -314,10 +314,10 @@ def run_feature_pipeline(num_workers=8, force=False):
             ).fetchone()[0]
             check_conn.close()
             if latest_feature_date and str(latest_feature_date) >= str(latest_price_date):
-                log_info(f"Features already up to date (latest: {latest_feature_date}). Skipping.")
+                log_info(f"Features up to date: feature_date={latest_feature_date}, price_date={latest_price_date}. Skipping.")
                 conn.close()
                 return
-            log_info(f"Features outdated (features: {latest_feature_date}, prices: {latest_price_date}). Regenerating...")
+            log_info(f"Features outdated: feature_date={latest_feature_date} < price_date={latest_price_date}. Regenerating...")
         except Exception:
             pass  # If check fails, proceed with regeneration
 

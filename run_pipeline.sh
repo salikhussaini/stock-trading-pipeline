@@ -1,5 +1,17 @@
 #!/bin/bash
-
+# Set PATH for cron compatibility
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export SHELL=/bin/bash
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+set -euo pipefail  # e=exit on error, u=undefined vars, o pipefail=pipe errors
+LOCK_FILE="/tmp/stock_pipeline.lock"
+if [ -f "$LOCK_FILE" ]; then
+    echo "Pipeline already running"
+    exit 1
+fi
+trap "rm -f $LOCK_FILE" EXIT
+touch "$LOCK_FILE"
 # =========================================================
 # run_pipeline.sh
 # Run the complete stock trading pipeline sequentially
@@ -45,7 +57,7 @@ echo ""
 echo -e "${GREEN}[1/3] Downloading stock data...${NC}"
 echo ""
 
-if python incremental_collector.py; then
+if python3 incremental_collector.py; then
     echo -e "${GREEN}✓ Data download complete${NC}"
     DOWNLOAD_TIME=$(($(date +%s) - START_TIME))
     echo -e "Time: ${DOWNLOAD_TIME}s"
@@ -62,7 +74,7 @@ fi
 echo -e "${GREEN}[2/3] Generating features...${NC}"
 echo ""
 
-if python feature_engine.py; then
+if python3 feature_engine.py; then
     echo -e "${GREEN}✓ Feature generation complete${NC}"
     FEATURE_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME))
     echo -e "Time: ${FEATURE_TIME}s"
@@ -79,7 +91,7 @@ fi
 echo -e "${GREEN}[3/3] Backtesting strategies...${NC}"
 echo ""
 
-if python backtester.py; then
+if python3 backtester.py; then
     echo -e "${GREEN}✓ Backtesting complete${NC}"
     BACKTEST_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME - FEATURE_TIME))
     echo -e "Time: ${BACKTEST_TIME}s"

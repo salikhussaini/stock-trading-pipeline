@@ -257,7 +257,7 @@ def process_ticker(ticker):
         if start_date >= end_date:
             conn.close()
             status = "SKIPPED"
-            error = "Already up-to-date"
+            error = f"Up to date (last: {start_date - timedelta(days=1)}, latest trading day: {end_date})"
             return  # Exit early - no download needed
 
         # -------------------------
