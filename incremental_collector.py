@@ -188,29 +188,39 @@ def safe_yf_download(ticker, start, end, retries=3):
     """
     base_delay = 1.0
 
-    # ensure start/end are strings in ISO format
-    if isinstance(start, (datetime, date)):
-        start = start.strftime("%Y-%m-%d")
-    if isinstance(end, (datetime, date)):
-        end_str = end.strftime("%Y-%m-%d")
-        end_date = end
+    # ensure start/end are date objects
+    if isinstance(start, str):
+        start_date = datetime.strptime(start, "%Y-%m-%d").date()
+    elif isinstance(start, datetime):
+        start_date = start.date()
     else:
-        end_str = end
+        start_date = start
+    
+    if isinstance(end, str):
         end_date = datetime.strptime(end, "%Y-%m-%d").date()
+    elif isinstance(end, datetime):
+        end_date = end.date()
+    else:
+        end_date = end
 
     current_end = end_date
     search_limit = 30  # Don't search more than 30 days back
 
     for attempt in range(search_limit):
+        # Stop searching if current_end goes before start_date
+        if current_end < start_date:
+            break
+            
         for retry in range(retries):
             try:
+                start_str = start_date.strftime("%Y-%m-%d")
                 current_end_str = current_end.strftime("%Y-%m-%d")
                 
                 # Suppress yfinance stdout/stderr
                 with contextlib.redirect_stdout(StringIO()), contextlib.redirect_stderr(StringIO()):
                     df = yf.download(
                         ticker,
-                        start=start,
+                        start=start_str,
                         end=current_end_str,
                         interval="1d",
                         auto_adjust=False,
