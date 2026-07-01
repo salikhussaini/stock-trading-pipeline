@@ -29,14 +29,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # QUERY FUNCTIONS
 # =========================================================
 
-def get_sell_opportunities(limit=10):
+def get_buy_opportunities(limit=5):
     """
-    Find stocks with strong sell signals based on backtest results.
-    Looks for strategies that predict price drops.
+    Find stocks with strong BUY signals based on backtest results.
+    Looks for strategies with positive returns and good risk metrics.
     """
     conn = duckdb.connect(str(DB_PATH), read_only=True)
     
-    # Query for stocks with highest negative momentum or overbought signals
     query = """
     WITH latest_signals AS (
         SELECT 
@@ -53,6 +52,7 @@ def get_sell_opportunities(limit=10):
         WHERE sharpe_ratio > 1.0
         AND num_trades >= 5
         AND win_rate > 0.6
+        AND total_return > 0
     )
     SELECT 
         ticker,
@@ -66,6 +66,48 @@ def get_sell_opportunities(limit=10):
     FROM latest_signals
     WHERE rn = 1
     ORDER BY sharpe_ratio DESC
+    LIMIT ?
+    """
+    
+    df = conn.execute(query, [limit]).df()
+    conn.close()
+    return df
+
+def get_sell_opportunities(limit=5):
+    """
+    Find stocks with strong SELL signals based on backtest results.
+    Looks for stocks with negative momentum or poor performance.
+    """
+    conn = duckdb.connect(str(DB_PATH), read_only=True)
+    
+    query = """
+    WITH latest_signals AS (
+        SELECT 
+            ticker,
+            strategy_name,
+            total_return,
+            sharpe_ratio,
+            win_rate,
+            num_trades,
+            avg_pnl,
+            max_loss,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY total_return ASC) as rn
+        FROM backtest_results
+        WHERE num_trades >= 5
+        AND total_return < 0
+    )
+    SELECT 
+        ticker,
+        strategy_name,
+        ROUND(total_return, 2) as return_pct,
+        ROUND(sharpe_ratio, 2) as sharpe,
+        ROUND(win_rate * 100, 1) as win_rate_pct,
+        num_trades,
+        ROUND(avg_pnl, 2) as avg_pnl,
+        ROUND(max_loss, 2) as max_loss
+    FROM latest_signals
+    WHERE rn = 1
+    ORDER BY total_return ASC
     LIMIT ?
     """
     
@@ -144,6 +186,35 @@ def send_telegram_message(message: str):
 # MESSAGE FORMATTERS
 # =========================================================
 
+def format_buy_alert(df: pd.DataFrame) -> str:
+    """Format buy opportunities as Telegram message."""
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    message = f"🟢 *TOP BUY IDEAS* 🟢\n"
+    message += f"_{timestamp}_\n\n"
+    
+    if df.empty:
+        message += "No strong buy signals at this time\\.\n"
+        return message
+    
+    message += f"Top {len(df)} stocks with strong buy signals:\n\n"
+    
+    for idx, row in df.iterrows():
+        # Escape special characters in variable data
+        ticker = escape_markdown(str(row['ticker']))
+        strategy = escape_markdown(str(row['strategy_name']))
+        
+        message += f"*{ticker}* \\| {strategy}\n"
+        message += f"  • Return: {row['return_pct']}%\n"
+        message += f"  • Sharpe: {row['sharpe']} \\| Win: {row['win_rate_pct']}%\n"
+        message += f"  • Trades: {row['num_trades']} \\| Avg P&L: ${row['avg_pnl']}\n"
+        message += f"  • Max Loss: {row['max_loss']}%\n\n"
+    
+    message += "⚠️ _This is algorithmic analysis, not financial advice\\._"
+    
+    return message
+
 def format_sell_alert(df: pd.DataFrame) -> str:
     """Format sell opportunities as Telegram message."""
     
@@ -195,7 +266,22 @@ def format_strategy_summary(df: pd.DataFrame) -> str:
 # MAIN
 # =========================================================
 
-def send_sell_ideas(limit=10):
+def send_buy_ideas(limit=5):
+    """Query and send buy opportunities to Telegram."""
+    print(f"🔍 Querying top {limit} buy opportunities...")
+    
+    df = get_buy_opportunities(limit)
+    
+    if df.empty:
+        print("No buy opportunities found.")
+        return
+    
+    print(f"Found {len(df)} opportunities")
+    
+    message = format_buy_alert(df)
+    send_telegram_message(message)
+
+def send_sell_ideas(limit=5):
     """Query and send sell opportunities to Telegram."""
     print(f"🔍 Querying top {limit} sell opportunities...")
     
@@ -222,18 +308,23 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Send trading alerts to Telegram")
-    parser.add_argument("--sell", action="store_true", help="Send sell opportunities")
+    parser.add_argument("--buy", action="store_true", help="Send buy opportunities only")
+    parser.add_argument("--sell", action="store_true", help="Send sell opportunities only")
     parser.add_argument("--summary", action="store_true", help="Send strategy summary")
-    parser.add_argument("--limit", type=int, default=10, help="Number of results to send")
+    parser.add_argument("--limit", type=int, default=5, help="Number of results to send (default: 5)")
     
     args = parser.parse_args()
     
-    if args.sell:
+    if args.buy:
+        send_buy_ideas(args.limit)
+    elif args.sell:
         send_sell_ideas(args.limit)
     elif args.summary:
         send_strategy_summary()
     else:
-        # Default: send both
+        # Default: send buy, sell, and summary
+        send_buy_ideas(args.limit)
+        print()
         send_sell_ideas(args.limit)
         print()
         send_strategy_summary()
