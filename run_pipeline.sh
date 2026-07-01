@@ -101,6 +101,18 @@ else
     exit 1
 fi
 
+echo -e "${GREEN}[4/4] Sending Telegram notification...${NC}"
+echo ""
+if $PYTHON telegram_sender.py; then
+    echo -e "${GREEN}✓ Telegram notification sent${NC}"
+    TELEGRAM_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME - FEATURE_TIME - BACKTEST_TIME))
+    echo -e "Time: ${TELEGRAM_TIME}s"
+    echo ""
+else
+    echo -e "${RED}✗ Telegram notification failed${NC}"
+    exit 1
+fi
+
 # =========================================================
 # SUMMARY
 # =========================================================
@@ -115,6 +127,7 @@ echo "Stage Breakdown:"
 echo "  Data download  : ${DOWNLOAD_TIME}s"
 echo "  Features       : ${FEATURE_TIME}s"
 echo "  Backtesting    : ${BACKTEST_TIME}s"
+echo "  Telegram       : ${TELEGRAM_TIME}s"
 echo "  ─────────────────────"
 echo "  Total time     : ${TOTAL_TIME}s (~$((TOTAL_TIME / 60))m)"
 echo ""
