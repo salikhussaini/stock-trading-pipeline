@@ -45,13 +45,13 @@ def get_sell_opportunities(limit=10):
             total_return,
             sharpe_ratio,
             win_rate,
-            total_trades,
+            num_trades,
             avg_pnl,
-            max_drawdown,
+            max_loss,
             ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY sharpe_ratio DESC) as rn
         FROM backtest_results
         WHERE sharpe_ratio > 1.0
-        AND total_trades >= 5
+        AND num_trades >= 5
         AND win_rate > 0.6
     )
     SELECT 
@@ -60,9 +60,9 @@ def get_sell_opportunities(limit=10):
         ROUND(total_return, 2) as return_pct,
         ROUND(sharpe_ratio, 2) as sharpe,
         ROUND(win_rate * 100, 1) as win_rate_pct,
-        total_trades,
+        num_trades,
         ROUND(avg_pnl, 2) as avg_pnl,
-        ROUND(max_drawdown, 2) as max_dd
+        ROUND(max_loss, 2) as max_loss
     FROM latest_signals
     WHERE rn = 1
     ORDER BY sharpe_ratio DESC
@@ -148,8 +148,8 @@ def format_sell_alert(df: pd.DataFrame) -> str:
         message += f"*{row['ticker']}* | {row['strategy_name']}\n"
         message += f"  • Return: {row['return_pct']}%\n"
         message += f"  • Sharpe: {row['sharpe']} | Win: {row['win_rate_pct']}%\n"
-        message += f"  • Trades: {row['total_trades']} | Avg P&L: ${row['avg_pnl']}\n"
-        message += f"  • Max DD: {row['max_dd']}%\n\n"
+        message += f"  • Trades: {row['num_trades']} | Avg P&L: ${row['avg_pnl']}\n"
+        message += f"  • Max Loss: {row['max_loss']}%\n\n"
     
     message += "⚠️ _This is algorithmic analysis, not financial advice._"
     
