@@ -1,6 +1,19 @@
 #!/bin/bash
 # Set PATH for cron compatibility
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+# At the top, after PATH export:
+if [ -f ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+    echo -e "${BLUE}Using .venv Python${NC}"
+elif [ -f "venv/bin/python" ]; then
+    PYTHON="venv/bin/python"
+    echo -e "${BLUE}Using venv Python${NC}"
+else
+    PYTHON="python3"
+    echo -e "${BLUE}Using system Python${NC}"
+fi
+
+
 export SHELL=/bin/bash
 export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
@@ -29,16 +42,6 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
-# Activate virtual environment if it exists
-if [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
-    echo -e "${BLUE}Virtual environment activated${NC}"
-elif [ -f ".venv/bin/activate" ]; then
-    source .venv/bin/activate
-    echo -e "${BLUE}Virtual environment activated${NC}"
-else
-    echo -e "${BLUE}No virtual environment found, using system Python${NC}"
-fi
 
 echo ""
 
@@ -57,7 +60,7 @@ echo ""
 echo -e "${GREEN}[1/3] Downloading stock data...${NC}"
 echo ""
 
-if python3 incremental_collector.py; then
+if $PYTHON incremental_collector.py; then
     echo -e "${GREEN}✓ Data download complete${NC}"
     DOWNLOAD_TIME=$(($(date +%s) - START_TIME))
     echo -e "Time: ${DOWNLOAD_TIME}s"
@@ -74,7 +77,7 @@ fi
 echo -e "${GREEN}[2/3] Generating features...${NC}"
 echo ""
 
-if python3 feature_engine.py; then
+if $PYTHON feature_engine.py; then
     echo -e "${GREEN}✓ Feature generation complete${NC}"
     FEATURE_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME))
     echo -e "Time: ${FEATURE_TIME}s"
@@ -91,7 +94,7 @@ fi
 echo -e "${GREEN}[3/3] Backtesting strategies...${NC}"
 echo ""
 
-if python3 backtester.py; then
+if $PYTHON backtester.py; then
     echo -e "${GREEN}✓ Backtesting complete${NC}"
     BACKTEST_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME - FEATURE_TIME))
     echo -e "Time: ${BACKTEST_TIME}s"
