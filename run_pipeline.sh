@@ -2,15 +2,12 @@
 # Set PATH for cron compatibility
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 # At the top, after PATH export:
-if [ -f ".venv/bin/python" ]; then
-    PYTHON=".venv/bin/python"
-    echo -e "${BLUE}Using .venv Python${NC}"
-elif [ -f "venv/bin/python" ]; then
-    PYTHON="venv/bin/python"
-    echo -e "${BLUE}Using venv Python${NC}"
-else
-    PYTHON="python3"
-    echo -e "${BLUE}Using system Python${NC}"
+PYTHON="/home/piuser/.venv-stock/bin/python"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "ERROR: Virtual environment not found at $PYTHON"
+    echo "Create it with: python3 -m venv /home/piuser/.venv-stock && pip install -r requirements.txt"
+    exit 1
 fi
 
 
