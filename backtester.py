@@ -997,6 +997,7 @@ def backtest_strategy(df: pd.DataFrame, initial_capital: float = 10000) -> Dict:
         return {'error': 'Invalid input data or missing signal column'}
     
     position = 0  # 0 = no position, 1 = long
+    shares = 0
     entry_price = 0
     trades = []
     portfolio_values = [initial_capital]
@@ -1015,6 +1016,7 @@ def backtest_strategy(df: pd.DataFrame, initial_capital: float = 10000) -> Dict:
         # -------------------------
         if signal == 1 and position == 0:
             shares = cash / next_close
+            cash = 0  # All cash is now in shares
             position = 1
             entry_price = next_close
             entry_date = next_date
@@ -1040,7 +1042,8 @@ def backtest_strategy(df: pd.DataFrame, initial_capital: float = 10000) -> Dict:
                 'holding_days': (exit_date - entry_date).days
             })
             
-            cash = cash + pnl
+            cash = shares * exit_price  # Convert shares back to cash
+            shares = 0
             position = 0
         
         # -------------------------
@@ -1068,6 +1071,10 @@ def backtest_strategy(df: pd.DataFrame, initial_capital: float = 10000) -> Dict:
             'pnl_pct': pnl_pct,
             'holding_days': (df.iloc[-1]['report_date'] - entry_date).days
         })
+        cash = shares * final_price  # Convert final position to cash
+        shares = 0
+        position = 0
+        portfolio_values[-1] = cash  # Update final portfolio value
     
     # -------------------------
     # CALCULATE METRICS
