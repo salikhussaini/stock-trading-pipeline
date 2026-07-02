@@ -32,6 +32,7 @@ SKIP_DOWNLOAD=false
 SKIP_TELEGRAM=false
 TEST_MODE=false
 WORKERS=2  # Reduced from 4 to avoid rate limits
+BATCH_SIZE=100  # Tickers per batch download request (0 = disabled, individual downloads)
 
 # =========================================================
 # HELPER FUNCTIONS
@@ -48,6 +49,7 @@ OPTIONS:
     --skip-telegram     Skip sending Telegram notifications
     --test              Test mode (process only 10 tickers)
     --workers N         Number of parallel workers (default: 2)
+    --batch-size N      Tickers per batch download request (default: 100, 0 = disabled)
     --help              Show this help message
 
 EXAMPLES:
@@ -55,6 +57,7 @@ EXAMPLES:
     $0 --test                   # Quick test with 10 tickers
     $0 --skip-download          # Skip download, run features + backtest
     $0 --workers 4              # Use 4 parallel workers (higher rate limit risk)
+    $0 --batch-size 0           # Disable batch downloads (one request per ticker)
 
 EOF
     exit 0
@@ -109,6 +112,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --workers)
             WORKERS="$2"
+            shift 2
+            ;;
+        --batch-size)
+            BATCH_SIZE="$2"
             shift 2
             ;;
         --help)
@@ -191,7 +198,7 @@ else
     log_step "[1/4] Downloading stock data..."
     echo ""
     
-    CMD="$PYTHON incremental_collector.py --workers $WORKERS"
+    CMD="$PYTHON incremental_collector.py --workers $WORKERS --batch-size $BATCH_SIZE"
     if [ "$TEST_MODE" = true ]; then
         CMD="$CMD --test"
     fi

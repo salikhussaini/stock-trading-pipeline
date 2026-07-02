@@ -98,7 +98,7 @@ parser = argparse.ArgumentParser(description="Incremental stock data collector")
 parser.add_argument("--test", action="store_true", help="Run a quick test using a small subset of tickers")
 parser.add_argument("--limit", type=int, default=0, help="Limit number of tickers (0 = all)")
 parser.add_argument("--workers", type=int, default=2, help="Number of worker threads (default: 2, more conservative)")
-parser.add_argument("--batch-size", type=int, default=0, help="Tickers per batch download request (0 = disabled, use individual downloads)")
+parser.add_argument("--batch-size", type=int, default=100, help="Tickers per batch download request (0 = disabled, use individual downloads)")
 args = parser.parse_args()
 
 
@@ -275,11 +275,9 @@ def safe_yf_download_batch(tickers, start, end, retries=3):
                 log_info(f"Batch download returned data: shape={df.shape}, columns={df.columns.tolist()[:5] if len(df.columns) > 5 else df.columns.tolist()}")
                 decrease_delay()
                 
-                # If only one ticker, df structure is different
-                if len(tickers) == 1:
-                    return {tickers[0]: df}
-                
-                # Parse multi-ticker result
+                # Parse result (group_by='ticker' always yields multi-level
+                # columns, even for a single ticker, so flatten the same way
+                # regardless of batch size)
                 result = {}
                 for ticker in tickers:
                     try:
