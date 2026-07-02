@@ -838,14 +838,16 @@ def run_walk_forward_batch(
     if output_path.exists() and not force_rerun:
         try:
             existing_df = pd.read_csv(output_path)
+            log_info(f"Loaded cache file with {len(existing_df)} total results")
             # Filter by matching strategy and parameters
             cached = existing_df[
                 (existing_df['strategy'] == strategy_name)
             ]
+            log_info(f"Found {len(cached)} results for strategy '{strategy_name}'")
             cached_tickers = set(cached['ticker'].tolist())
             existing_results = cached.to_dict('records')
             if cached_tickers:
-                log_info(f"Found {len(cached_tickers)} cached results for {strategy_name}")
+                log_info(f"Cached tickers for {strategy_name}: {cached_tickers}")
         except Exception as e:
             log_warning(f"Could not load cached results: {e}")
     
@@ -858,6 +860,9 @@ def run_walk_forward_batch(
     
     if limit:
         all_tickers = all_tickers[:limit]
+    
+    log_info(f"Tickers to check: {all_tickers}")
+    log_info(f"Cached tickers: {cached_tickers}")
     
     # Separate tickers into cached and to-analyze
     tickers_to_analyze = [t for t in all_tickers if t not in cached_tickers]
@@ -1663,8 +1668,19 @@ Examples:
         )
         
         if not results.empty:
-            # Save results
+            # Save results - merge with existing file to preserve all strategies
             output_path = Path(__file__).parent / "walk_forward_results.csv"
+            
+            if output_path.exists():
+                # Load all existing results
+                existing_all = pd.read_csv(output_path)
+                # Remove old results for same (ticker, strategy) pairs
+                mask = ~((existing_all['ticker'].isin(results['ticker'])) & 
+                         (existing_all['strategy'] == args.wf_strategy))
+                existing_all = existing_all[mask]
+                # Append new results
+                results = pd.concat([existing_all, results], ignore_index=True)
+            
             results.to_csv(output_path, index=False)
             log_info(f"\nResults saved to: {output_path}")
     
