@@ -504,6 +504,337 @@ STRATEGIES = {
 # BACKTEST LOGIC
 # =========================================================
 
+# =========================================================
+# WALK-FORWARD ANALYSIS (Anti-Overfitting)
+# =========================================================
+
+def optimize_rsi_params(df: pd.DataFrame) -> Dict:
+    """
+    Optimize RSI parameters on training data.
+    Grid search over buy/sell thresholds.
+    
+    Returns best parameters based on Sharpe ratio.
+    """
+    best_sharpe = -999
+    best_params = {'buy_threshold': 30, 'sell_threshold': 70}
+    
+    # Grid search
+    for buy_thresh in [20, 25, 30, 35, 40]:
+        for sell_thresh in [60, 65, 70, 75, 80]:
+            if sell_thresh <= buy_thresh:
+                continue
+            
+            test_df = rsi_classic(df.copy(), buy_threshold=buy_thresh, sell_threshold=sell_thresh)
+            result = backtest_strategy(test_df, initial_capital=10000)
+            
+            if 'error' not in result and result['sharpe_ratio'] > best_sharpe:
+                best_sharpe = result['sharpe_ratio']
+                best_params = {'buy_threshold': buy_thresh, 'sell_threshold': sell_thresh}
+    
+    return best_params
+
+def walk_forward_analysis(
+    df: pd.DataFrame,
+    strategy_name: str = 'rsi_classic',
+    train_days: int = 252,  # 1 year training
+    test_days: int = 63,    # 1 quarter testing
+    step_days: int = 21     # Roll forward 1 month at a time
+) -> Dict:
+    """
+    Walk-Forward Analysis: Prevents overfitting by testing on unseen data.
+    
+    Process:
+    1. Train on Year 1 → Optimize parameters
+    2. Test on Quarter 1 of Year 2 (out-of-sample)
+    3. Roll forward by 1 month
+    4. Repeat until end of data
+    
+    Args:
+        df: Historical data (must have 'report_date' sorted)
+        strategy_name: Strategy to test (currently supports 'rsi_classic')
+        train_days: Training window size (252 = 1 year)
+        test_days: Testing window size (63 = 1 quarter)
+        step_days: Roll forward step (21 = 1 month)
+    
+    Returns:
+        Dictionary with walk-forward results
+    """
+    df = df.sort_values('report_date').reset_index(drop=True)
+    
+    if len(df) < train_days + test_days:
+        return {
+            'error': f'Insufficient data: need {train_days + test_days} days, have {len(df)}',
+            'ticker': df.iloc[0]['ticker'] if 'ticker' in df.columns else 'UNKNOWN'
+        }
+    
+    all_trades = []
+    window_results = []
+    total_portfolio_value = 10000
+    
+    # Walk forward through time
+    start_idx = 0
+    window_num = 1
+    
+    while start_idx + train_days + test_days <= len(df):
+        # Split into train and test
+        train_df = df.iloc[start_idx : start_idx + train_days].copy()
+        test_df = df.iloc[start_idx + train_days : start_idx + train_days + test_days].copy()
+        
+        train_start = train_df.iloc[0]['report_date']
+        train_end = train_df.iloc[-1]['report_date']
+        test_start = test_df.iloc[0]['report_date']
+        test_end = test_df.iloc[-1]['report_date']
+        
+        # Optimize on training data
+        if strategy_name == 'rsi_classic':
+            best_params = optimize_rsi_params(train_df)
+            # Apply to test data
+            test_df = rsi_classic(test_df, **best_params)
+        else:
+            # Default: use fixed strategy
+            strategy_func = STRATEGIES.get(strategy_name, rsi_classic)
+            test_df = strategy_func(test_df)
+            best_params = {}
+        
+        # Backtest on out-of-sample test data
+        test_result = backtest_strategy(test_df, initial_capital=total_portfolio_value)
+        
+        if 'error' not in test_result:
+            window_results.append({
+                'window': window_num,
+                'train_start': train_start,
+                'train_end': train_end,
+                'test_start': test_start,
+                'test_end': test_end,
+                'params': str(best_params),
+                'return': test_result['total_return'],
+                'sharpe': test_result['sharpe_ratio'],
+                'trades': test_result['num_trades'],
+                'win_rate': test_result['win_rate']
+            })
+            
+            # Update portfolio value for next window
+            total_portfolio_value = test_result['final_value']
+            
+            # Collect trades
+            if 'trades' in test_result and not test_result['trades'].empty:
+                all_trades.append(test_result['trades'])
+        
+        # Roll forward
+        start_idx += step_days
+        window_num += 1
+    
+    if not window_results:
+        return {
+            'error': 'No valid walk-forward windows',
+            'ticker': df.iloc[0]['ticker'] if 'ticker' in df.columns else 'UNKNOWN'
+        }
+    
+    # Aggregate results
+    wf_df = pd.DataFrame(window_results)
+    all_trades_df = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
+    
+    # Calculate walk-forward metrics
+    total_return = (total_portfolio_value - 10000) / 10000
+    avg_window_return = wf_df['return'].mean()
+    avg_sharpe = wf_df['sharpe'].mean()
+    win_windows = (wf_df['return'] > 0).sum()
+    total_windows = len(wf_df)
+    consistency = win_windows / total_windows
+    
+    # Compare to buy & hold
+    buy_hold_return = (df.iloc[-1]['close'] - df.iloc[0]['close']) / df.iloc[0]['close']
+    
+    return {
+        'ticker': df.iloc[0]['ticker'] if 'ticker' in df.columns else 'UNKNOWN',
+        'strategy': strategy_name,
+        'total_return': total_return,
+        'buy_hold_return': buy_hold_return,
+        'avg_window_return': avg_window_return,
+        'avg_sharpe': avg_sharpe,
+        'num_windows': total_windows,
+        'winning_windows': win_windows,
+        'consistency': consistency,
+        'final_value': total_portfolio_value,
+        'window_details': wf_df,
+        'all_trades': all_trades_df
+    }
+
+def run_walk_forward_batch(
+    tickers: List[str] = None,
+    strategy_name: str = 'rsi_classic',
+    limit: int = None,
+    train_days: int = 252,
+    test_days: int = 63,
+    step_days: int = 21
+) -> pd.DataFrame:
+    """
+    Run walk-forward analysis on multiple tickers.
+    Ranks stocks by consistency and out-of-sample performance.
+    
+    Args:
+        tickers: List of tickers (None = all from database)
+        strategy_name: Strategy to test
+        limit: Limit number of tickers
+        train_days: Training window (252 = 1 year)
+        test_days: Testing window (63 = 1 quarter)
+        step_days: Roll forward step (21 = 1 month)
+    
+    Returns:
+        DataFrame with ranked results
+    """
+    conn = duckdb.connect(str(DB_PATH))
+    
+    # Get tickers
+    if tickers is None:
+        all_tickers_query = f"SELECT DISTINCT ticker FROM read_parquet('{FEATURES_PATH}') ORDER BY ticker"
+        all_tickers = conn.execute(all_tickers_query).df()['ticker'].tolist()
+    else:
+        all_tickers = tickers
+    
+    if limit:
+        all_tickers = all_tickers[:limit]
+    
+    log_pipeline_start(
+        "Walk-Forward Analysis",
+        strategy=strategy_name,
+        tickers=len(all_tickers),
+        train_days=train_days,
+        test_days=test_days,
+        step_days=step_days
+    )
+    
+    results = []
+    
+    for idx, ticker in enumerate(all_tickers, 1):
+        log_info(f"[{idx}/{len(all_tickers)}] Analyzing {ticker}...")
+        
+        # Load ticker data
+        query = f"""
+            SELECT *
+            FROM read_parquet('{FEATURES_PATH}')
+            WHERE ticker = '{ticker}'
+            ORDER BY report_date
+        """
+        ticker_df = conn.execute(query).df()
+        
+        if ticker_df.empty:
+            continue
+        
+        # Rename columns for strategy functions
+        if 'report_date' in ticker_df.columns:
+            ticker_df = ticker_df.rename(columns={'report_date': 'date'})
+        
+        # Map feature columns
+        if 'lt_rsi_28' in ticker_df.columns and 'rsi_14' not in ticker_df.columns:
+            ticker_df['rsi_14'] = ticker_df.get('st_rsi_14', ticker_df['lt_rsi_28'])
+        if 'lt_macd' in ticker_df.columns and 'macd' not in ticker_df.columns:
+            ticker_df['macd'] = ticker_df['lt_macd']
+            ticker_df['macd_signal'] = ticker_df['lt_macd_signal']
+            ticker_df['macd_histogram'] = ticker_df['lt_macd_histogram']
+        if 'lt_sma_20' in ticker_df.columns and 'sma_10' not in ticker_df.columns:
+            ticker_df['sma_10'] = ticker_df.get('st_sma_10', ticker_df['lt_sma_20'])
+            ticker_df['sma_20'] = ticker_df['lt_sma_20']
+            ticker_df['sma_50'] = ticker_df['lt_sma_50']
+        
+        # Rename back for walk_forward_analysis
+        if 'date' in ticker_df.columns:
+            ticker_df = ticker_df.rename(columns={'date': 'report_date'})
+        
+        # Run walk-forward analysis
+        wf_result = walk_forward_analysis(
+            ticker_df,
+            strategy_name=strategy_name,
+            train_days=train_days,
+            test_days=test_days,
+            step_days=step_days
+        )
+        
+        if 'error' not in wf_result:
+            results.append({
+                'ticker': ticker,
+                'total_return': wf_result['total_return'],
+                'buy_hold_return': wf_result['buy_hold_return'],
+                'avg_window_return': wf_result['avg_window_return'],
+                'avg_sharpe': wf_result['avg_sharpe'],
+                'consistency': wf_result['consistency'],
+                'num_windows': wf_result['num_windows'],
+                'winning_windows': wf_result['winning_windows'],
+                'beats_buy_hold': wf_result['total_return'] > wf_result['buy_hold_return'],
+                'final_value': wf_result['final_value']
+            })
+            
+            log_info(f"  ✓ Return: {wf_result['total_return']*100:+6.2f}% | Consistency: {wf_result['consistency']*100:.1f}% | Sharpe: {wf_result['avg_sharpe']:.2f}")
+        else:
+            log_warning(f"  ✗ {wf_result.get('error', 'Unknown error')}")
+    
+    conn.close()
+    
+    if not results:
+        log_error("No valid walk-forward results")
+        return pd.DataFrame()
+    
+    # Create summary DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Calculate composite score
+    # Score = (Consistency * 0.4) + (Normalized Return * 0.3) + (Normalized Sharpe * 0.3)
+    results_df['return_zscore'] = (results_df['total_return'] - results_df['total_return'].mean()) / results_df['total_return'].std()
+    results_df['sharpe_zscore'] = (results_df['avg_sharpe'] - results_df['avg_sharpe'].mean()) / results_df['avg_sharpe'].std()
+    results_df['composite_score'] = (
+        results_df['consistency'] * 0.4 +
+        results_df['return_zscore'] * 0.3 +
+        results_df['sharpe_zscore'] * 0.3
+    )
+    
+    # Sort by composite score
+    results_df = results_df.sort_values('composite_score', ascending=False)
+    
+    # Display top recommendations
+    log_section("WALK-FORWARD ANALYSIS RESULTS")
+    log_info(f"\nTop Stocks to Consider (Ranked by Robustness):\n")
+    
+    display_cols = ['ticker', 'total_return', 'consistency', 'avg_sharpe', 'beats_buy_hold', 'composite_score']
+    top_10 = results_df.head(10)[display_cols].copy()
+    top_10['total_return'] = top_10['total_return'].apply(lambda x: f"{x*100:+6.2f}%")
+    top_10['consistency'] = top_10['consistency'].apply(lambda x: f"{x*100:.1f}%")
+    top_10['avg_sharpe'] = top_10['avg_sharpe'].apply(lambda x: f"{x:.2f}")
+    top_10['composite_score'] = top_10['composite_score'].apply(lambda x: f"{x:.3f}")
+    
+    log_info(f"\n{top_10.to_string(index=False)}")
+    
+    log_section("BUY RECOMMENDATIONS")
+    buy_candidates = results_df[
+        (results_df['consistency'] >= 0.5) &  # Win at least 50% of windows
+        (results_df['total_return'] > 0) &    # Positive total return
+        (results_df['avg_sharpe'] > 0.5)      # Decent risk-adjusted return
+    ]
+    
+    if buy_candidates.empty:
+        log_warning("No stocks meet all buy criteria (consistency >= 50%, positive return, Sharpe > 0.5)")
+    else:
+        log_info(f"\n{len(buy_candidates)} stocks meet buy criteria:\n")
+        buy_display = buy_candidates[['ticker', 'total_return', 'consistency', 'avg_sharpe', 'composite_score']].head(20).copy()
+        buy_display['total_return'] = buy_display['total_return'].apply(lambda x: f"{x*100:+6.2f}%")
+        buy_display['consistency'] = buy_display['consistency'].apply(lambda x: f"{x*100:.1f}%")
+        buy_display['avg_sharpe'] = buy_display['avg_sharpe'].apply(lambda x: f"{x:.2f}")
+        buy_display['composite_score'] = buy_display['composite_score'].apply(lambda x: f"{x:.3f}")
+        log_info(f"\n{buy_display.to_string(index=False)}")
+    
+    metrics = {
+        "Total Analyzed": len(results_df),
+        "Buy Candidates": len(buy_candidates),
+        "Avg Consistency": f"{results_df['consistency'].mean()*100:.1f}%",
+        "Median Return": f"{results_df['total_return'].median()*100:+.2f}%"
+    }
+    log_pipeline_end("Walk-Forward Analysis", status="SUCCESS", **metrics)
+    
+    return results_df
+
+# =========================================================
+# STANDARD BACKTEST LOGIC
+# =========================================================
+
 def backtest_strategy(df: pd.DataFrame, initial_capital: float = 10000) -> Dict:
     """
     Backtest a trading strategy on historical data.
@@ -1026,6 +1357,7 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # STANDARD BACKTEST (all strategies)
   # Test all 28 strategies on 10 tickers (8 workers)
   python backtester.py --limit 10
   
@@ -1043,7 +1375,23 @@ Examples:
   
   # Test on specific tickers
   python backtester.py --tickers AAPL MSFT GOOGL NVDA
+  
+  # WALK-FORWARD ANALYSIS (find stocks to buy)
+  # Analyze 20 stocks with walk-forward (prevents overfitting)
+  python backtester.py --walk-forward --limit 20
+  
+  # Walk-forward on specific tickers
+  python backtester.py --walk-forward --tickers AAPL MSFT GOOGL NVDA TSLA
+  
+  # Custom walk-forward windows (6 months train, 1 month test)
+  python backtester.py --walk-forward --limit 10 --train-days 126 --test-days 21
         """
+    )
+    
+    parser.add_argument(
+        '--walk-forward',
+        action='store_true',
+        help='Run walk-forward analysis (anti-overfitting) instead of standard backtest'
     )
     
     parser.add_argument(
@@ -1071,30 +1419,78 @@ Examples:
         '--workers',
         type=int,
         default=8,
-        help='Number of worker processes (default: 8)'
+        help='Number of worker processes (default: 8, only for standard backtest)'
     )
     
     parser.add_argument(
         '--force-rerun',
         action='store_true',
-        help='Force re-run without using cached results'
+        help='Force re-run without using cached results (standard backtest only)'
+    )
+    
+    parser.add_argument(
+        '--train-days',
+        type=int,
+        default=252,
+        help='Walk-forward training window in days (default: 252 = 1 year)'
+    )
+    
+    parser.add_argument(
+        '--test-days',
+        type=int,
+        default=63,
+        help='Walk-forward testing window in days (default: 63 = 1 quarter)'
+    )
+    
+    parser.add_argument(
+        '--step-days',
+        type=int,
+        default=21,
+        help='Walk-forward step size in days (default: 21 = 1 month)'
     )
     
     args = parser.parse_args()
     
-    # Validate strategy names
-    if args.strategies:
-        invalid = [s for s in args.strategies if s not in STRATEGIES]
-        if invalid:
-            print(f"Error: Invalid strategies: {', '.join(invalid)}")
-            print(f"Available strategies: {', '.join(sorted(STRATEGIES.keys()))}")
-            sys.exit(1)
+    # =========================================================
+    # WALK-FORWARD ANALYSIS MODE
+    # =========================================================
+    if args.walk_forward:
+        log_info("Running WALK-FORWARD ANALYSIS mode (anti-overfitting)")
+        
+        results = run_walk_forward_batch(
+            tickers=args.tickers,
+            strategy_name='rsi_classic',  # Currently only RSI supports parameter optimization
+            limit=args.limit,
+            train_days=args.train_days,
+            test_days=args.test_days,
+            step_days=args.step_days
+        )
+        
+        if not results.empty:
+            # Save results
+            output_path = Path(__file__).parent / "walk_forward_results.csv"
+            results.to_csv(output_path, index=False)
+            log_info(f"\nResults saved to: {output_path}")
     
-    # Run backtest with provided arguments
-    results = run_backtest(
-        strategies=args.strategies,
-        tickers=args.tickers,
-        limit=args.limit,
-        force_rerun=args.force_rerun,
-        num_workers=args.workers
-    )
+    # =========================================================
+    # STANDARD BACKTEST MODE
+    # =========================================================
+    else:
+        log_info("Running STANDARD BACKTEST mode")
+        
+        # Validate strategy names
+        if args.strategies:
+            invalid = [s for s in args.strategies if s not in STRATEGIES]
+            if invalid:
+                print(f"Error: Invalid strategies: {', '.join(invalid)}")
+                print(f"Available strategies: {', '.join(sorted(STRATEGIES.keys()))}")
+                sys.exit(1)
+        
+        # Run backtest with provided arguments
+        results = run_backtest(
+            strategies=args.strategies,
+            tickers=args.tickers,
+            limit=args.limit,
+            force_rerun=args.force_rerun,
+            num_workers=args.workers
+        )

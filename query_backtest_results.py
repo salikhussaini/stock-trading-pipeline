@@ -2,6 +2,7 @@
 """
 Query and analyze backtest results from DuckDB.
 Rank strategies, compare performance, and generate reports.
+Supports both standard backtests and walk-forward analysis.
 """
 
 import duckdb
@@ -15,6 +16,7 @@ import numpy as np
 # =========================================================
 
 DB_PATH = Path(__file__).parent / "database" / "stock_data.duckdb"
+WALK_FORWARD_CSV = Path(__file__).parent / "walk_forward_results.csv"
 
 # =========================================================
 # QUERY FUNCTIONS
@@ -303,6 +305,230 @@ def get_stats(strategy: Optional[str] = None, ticker: Optional[str] = None) -> D
     return stats
 
 # =========================================================
+# WALK-FORWARD ANALYSIS QUERIES
+# =========================================================
+
+def load_walk_forward_results() -> pd.DataFrame:
+    """
+    Load walk-forward analysis results from CSV.
+    
+    Returns:
+        DataFrame with walk-forward results, or empty DataFrame if file doesn't exist
+    """
+    if not WALK_FORWARD_CSV.exists():
+        print(f"⚠️  Walk-forward results not found at {WALK_FORWARD_CSV}")
+        print("   Run: python backtester.py --walk-forward --limit 20")
+        return pd.DataFrame()
+    
+    return pd.read_csv(WALK_FORWARD_CSV)
+
+def query_walk_forward(
+    sort_by: str = 'composite_score',
+    min_consistency: float = 0.0,
+    min_return: float = None,
+    min_sharpe: float = None,
+    only_buy_candidates: bool = False
+) -> pd.DataFrame:
+    """
+    Query walk-forward analysis results with filtering.
+    
+    Args:
+        sort_by: Column to sort by (composite_score, total_return, consistency, avg_sharpe)
+        min_consistency: Minimum consistency threshold (0.0-1.0)
+        min_return: Minimum total return threshold
+        min_sharpe: Minimum average Sharpe ratio
+        only_buy_candidates: Filter for stocks meeting buy criteria
+    
+    Returns:
+        Filtered and sorted DataFrame
+    """
+    df = load_walk_forward_results()
+    
+    if df.empty:
+        return df
+    
+    # Apply filters
+    if min_consistency > 0:
+        df = df[df['consistency'] >= min_consistency]
+    
+    if min_return is not None:
+        df = df[df['total_return'] >= min_return]
+    
+    if min_sharpe is not None:
+        df = df[df['avg_sharpe'] >= min_sharpe]
+    
+    if only_buy_candidates:
+        df = df[
+            (df['consistency'] >= 0.5) &
+            (df['total_return'] > 0) &
+            (df['avg_sharpe'] > 0.5)
+        ]
+    
+    # Sort
+    if sort_by in df.columns:
+        df = df.sort_values(sort_by, ascending=False)
+    
+    return df
+
+def get_buy_recommendations(min_composite_score: float = 0.0) -> pd.DataFrame:
+    """
+    Get stocks that meet all buy criteria from walk-forward analysis.
+    
+    Args:
+        min_composite_score: Minimum composite score (0 = no filter)
+    
+    Returns:
+        DataFrame with buy recommendations sorted by composite score
+    """
+    df = query_walk_forward(only_buy_candidates=True)
+    
+    if not df.empty and min_composite_score > 0:
+        df = df[df['composite_score'] >= min_composite_score]
+    
+    return df
+
+def compare_wf_to_standard(ticker: str) -> Dict:
+    """
+    Compare walk-forward performance to standard backtest for a ticker.
+    
+    Args:
+        ticker: Stock ticker symbol
+    
+    Returns:
+        Dictionary with comparison metrics
+    """
+    # Get walk-forward results
+    wf_df = load_walk_forward_results()
+    if wf_df.empty or ticker not in wf_df['ticker'].values:
+        return {'error': f'No walk-forward results for {ticker}'}
+    
+    wf_result = wf_df[wf_df['ticker'] == ticker].iloc[0]
+    
+    # Get standard backtest results
+    conn = duckdb.connect(str(DB_PATH))
+    std_results = conn.execute(
+        "SELECT * FROM backtest_results WHERE ticker = ? ORDER BY sharpe_ratio DESC",
+        [ticker]
+    ).df()
+    conn.close()
+    
+    if std_results.empty:
+        return {
+            'ticker': ticker,
+            'walk_forward': {
+                'return': wf_result['total_return'],
+                'consistency': wf_result['consistency'],
+                'sharpe': wf_result['avg_sharpe']
+            },
+            'standard_backtest': 'No results'
+        }
+    
+    # Best standard strategy for this ticker
+    best_std = std_results.iloc[0]
+    
+    return {
+        'ticker': ticker,
+        'walk_forward': {
+            'return': wf_result['total_return'],
+            'consistency': wf_result['consistency'],
+            'sharpe': wf_result['avg_sharpe'],
+            'composite_score': wf_result['composite_score'],
+            'num_windows': wf_result['num_windows']
+        },
+        'standard_backtest': {
+            'best_strategy': best_std['strategy_name'],
+            'return': best_std['total_return'],
+            'sharpe': best_std['sharpe_ratio'],
+            'win_rate': best_std['win_rate'],
+            'num_trades': best_std['num_trades']
+        },
+        'recommendation': 'BUY' if (
+            wf_result['consistency'] >= 0.5 and
+            wf_result['total_return'] > 0 and
+            wf_result['avg_sharpe'] > 0.5
+        ) else 'HOLD/SKIP'
+    }
+
+def rank_stocks_by_robustness(top_n: int = 20) -> pd.DataFrame:
+    """
+    Rank stocks by walk-forward robustness (composite score).
+    
+    Args:
+        top_n: Number of top stocks to return
+    
+    Returns:
+        DataFrame with top N most robust stocks
+    """
+    df = load_walk_forward_results()
+    
+    if df.empty:
+        return df
+    
+    # Add robustness grade
+    def grade_stock(row):
+        score = row['composite_score']
+        consistency = row['consistency']
+        
+        if score > 0.6 and consistency >= 0.6:
+            return 'A - Excellent'
+        elif score > 0.4 and consistency >= 0.5:
+            return 'B - Good'
+        elif score > 0.2 and consistency >= 0.4:
+            return 'C - Fair'
+        else:
+            return 'D - Poor'
+    
+    df['robustness_grade'] = df.apply(grade_stock, axis=1)
+    
+    return df.nlargest(top_n, 'composite_score')[
+        ['ticker', 'total_return', 'consistency', 'avg_sharpe', 
+         'composite_score', 'robustness_grade', 'beats_buy_hold']
+    ]
+
+def portfolio_from_walk_forward(
+    num_stocks: int = 10,
+    min_consistency: float = 0.5,
+    allocation_method: str = 'equal'
+) -> pd.DataFrame:
+    """
+    Generate portfolio allocation from walk-forward results.
+    
+    Args:
+        num_stocks: Number of stocks in portfolio
+        min_consistency: Minimum consistency requirement
+        allocation_method: 'equal' or 'score_weighted'
+    
+    Returns:
+        DataFrame with portfolio allocations
+    """
+    # Get buy candidates
+    df = get_buy_recommendations()
+    
+    if df.empty:
+        print("⚠️  No stocks meet buy criteria")
+        return pd.DataFrame()
+    
+    # Filter by consistency
+    df = df[df['consistency'] >= min_consistency]
+    
+    # Top N by composite score
+    portfolio = df.nlargest(num_stocks, 'composite_score').copy()
+    
+    # Calculate allocation
+    if allocation_method == 'equal':
+        portfolio['allocation'] = 1.0 / len(portfolio)
+    elif allocation_method == 'score_weighted':
+        total_score = portfolio['composite_score'].sum()
+        portfolio['allocation'] = portfolio['composite_score'] / total_score
+    
+    portfolio['allocation_pct'] = portfolio['allocation'] * 100
+    
+    return portfolio[
+        ['ticker', 'total_return', 'consistency', 'avg_sharpe', 
+         'composite_score', 'allocation_pct']
+    ]
+
+# =========================================================
 # REPORTING FUNCTIONS
 # =========================================================
 
@@ -364,36 +590,217 @@ def print_comparison(strategy1: str, strategy2: str):
     print(f"{strategy1:20}: {s1_wins}/{total} wins ({s1_wins/total*100:.1f}%)")
     print(f"{strategy2:20}: {s2_wins}/{total} wins ({s2_wins/total*100:.1f}%)")
 
+def print_walk_forward_report():
+    """Print detailed walk-forward analysis report."""
+    df = load_walk_forward_results()
+    
+    if df.empty:
+        return
+    
+    print(f"\n{'='*100}")
+    print("WALK-FORWARD ANALYSIS REPORT")
+    print(f"{'='*100}\n")
+    
+    print(f"Total Stocks Analyzed: {len(df)}")
+    print(f"Buy Candidates: {len(get_buy_recommendations())}")
+    print(f"Avg Consistency: {df['consistency'].mean()*100:.1f}%")
+    print(f"Median Return: {df['total_return'].median()*100:+.2f}%")
+    
+    # Top 10
+    print(f"\n{'-'*100}")
+    print("TOP 10 STOCKS (by Composite Score)")
+    print(f"{'-'*100}\n")
+    top_10 = df.nlargest(10, 'composite_score').copy()
+    top_10['total_return'] = top_10['total_return'].apply(lambda x: f"{x*100:+6.2f}%")
+    top_10['consistency'] = top_10['consistency'].apply(lambda x: f"{x*100:.1f}%")
+    top_10['avg_sharpe'] = top_10['avg_sharpe'].apply(lambda x: f"{x:.2f}")
+    top_10['composite_score'] = top_10['composite_score'].apply(lambda x: f"{x:.3f}")
+    
+    print(top_10[['ticker', 'total_return', 'consistency', 'avg_sharpe', 'composite_score']].to_string(index=False))
+    
+    # Buy recommendations
+    buy_recs = get_buy_recommendations()
+    if not buy_recs.empty:
+        print(f"\n{'-'*100}")
+        print(f"BUY RECOMMENDATIONS ({len(buy_recs)} stocks)")
+        print(f"{'-'*100}\n")
+        
+        buy_display = buy_recs.head(15).copy()
+        buy_display['total_return'] = buy_display['total_return'].apply(lambda x: f"{x*100:+6.2f}%")
+        buy_display['consistency'] = buy_display['consistency'].apply(lambda x: f"{x*100:.1f}%")
+        buy_display['avg_sharpe'] = buy_display['avg_sharpe'].apply(lambda x: f"{x:.2f}")
+        buy_display['composite_score'] = buy_display['composite_score'].apply(lambda x: f"{x:.3f}")
+        
+        print(buy_display[['ticker', 'total_return', 'consistency', 'avg_sharpe', 'composite_score']].to_string(index=False))
+
+def print_portfolio_report(num_stocks: int = 10):
+    """Print portfolio allocation based on walk-forward results."""
+    portfolio = portfolio_from_walk_forward(num_stocks=num_stocks, allocation_method='score_weighted')
+    
+    if portfolio.empty:
+        return
+    
+    print(f"\n{'='*100}")
+    print(f"RECOMMENDED PORTFOLIO ({num_stocks} stocks, score-weighted)")
+    print(f"{'='*100}\n")
+    
+    portfolio_display = portfolio.copy()
+    portfolio_display['total_return'] = portfolio_display['total_return'].apply(lambda x: f"{x*100:+6.2f}%")
+    portfolio_display['consistency'] = portfolio_display['consistency'].apply(lambda x: f"{x*100:.1f}%")
+    portfolio_display['avg_sharpe'] = portfolio_display['avg_sharpe'].apply(lambda x: f"{x:.2f}")
+    portfolio_display['composite_score'] = portfolio_display['composite_score'].apply(lambda x: f"{x:.3f}")
+    portfolio_display['allocation_pct'] = portfolio_display['allocation_pct'].apply(lambda x: f"{x:.1f}%")
+    
+    print(portfolio_display.to_string(index=False))
+    
+    # Portfolio statistics
+    print(f"\n{'-'*100}")
+    print("Portfolio Statistics:")
+    print(f"{'-'*100}")
+    weighted_return = (portfolio['total_return'] * portfolio['allocation']).sum()
+    avg_consistency = portfolio['consistency'].mean()
+    avg_sharpe = portfolio['avg_sharpe'].mean()
+    
+    print(f"Expected Return: {weighted_return*100:+.2f}%")
+    print(f"Avg Consistency: {avg_consistency*100:.1f}%")
+    print(f"Avg Sharpe: {avg_sharpe:.2f}")
+
+def print_ticker_comparison(ticker: str):
+    """Compare walk-forward vs standard backtest for a ticker."""
+    comparison = compare_wf_to_standard(ticker)
+    
+    if 'error' in comparison:
+        print(f"\n⚠️  {comparison['error']}")
+        return
+    
+    print(f"\n{'='*100}")
+    print(f"COMPARISON: {ticker} (Walk-Forward vs Standard Backtest)")
+    print(f"{'='*100}\n")
+    
+    wf = comparison['walk_forward']
+    std = comparison['standard_backtest']
+    
+    print(f"{'Walk-Forward Analysis:':30}")
+    print(f"  Return:                     {wf['return']*100:+6.2f}%")
+    print(f"  Consistency:                {wf['consistency']*100:5.1f}%")
+    print(f"  Avg Sharpe:                 {wf['sharpe']:5.2f}")
+    print(f"  Composite Score:            {wf['composite_score']:5.3f}")
+    print(f"  Test Windows:               {wf['num_windows']}")
+    
+    print(f"\n{'Standard Backtest (Best):':30}")
+    if std == 'No results':
+        print(f"  No standard backtest results")
+    else:
+        print(f"  Strategy:                   {std['best_strategy']}")
+        print(f"  Return:                     {std['return']*100:+6.2f}%")
+        print(f"  Sharpe:                     {std['sharpe']:5.2f}")
+        print(f"  Win Rate:                   {std['win_rate']*100:5.1f}%")
+        print(f"  Trades:                     {std['num_trades']}")
+    
+    print(f"\n{'Recommendation:':30} {comparison['recommendation']}")
+    print(f"{'='*100}")
+
 # =========================================================
 # EXAMPLE USAGE
 # =========================================================
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Query and analyze backtest results",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # View all reports (standard + walk-forward)
+  python query_backtest_results.py
+  
+  # Standard backtest reports only
+  python query_backtest_results.py --standard
+  
+  # Walk-forward analysis only
+  python query_backtest_results.py --walk-forward
+  
+  # Compare specific ticker (walk-forward vs standard)
+  python query_backtest_results.py --compare AAPL
+  
+  # Generate portfolio from walk-forward (top 10 stocks)
+  python query_backtest_results.py --portfolio 10
+  
+  # Specific strategy report
+  python query_backtest_results.py --strategy rsi_classic
+  
+  # Specific ticker report (all strategies)
+  python query_backtest_results.py --ticker MSFT
+        """
+    )
+    
+    parser.add_argument('--standard', action='store_true', help='Show standard backtest reports only')
+    parser.add_argument('--walk-forward', action='store_true', help='Show walk-forward analysis only')
+    parser.add_argument('--compare', type=str, help='Compare walk-forward vs standard for ticker')
+    parser.add_argument('--portfolio', type=int, help='Generate portfolio with N stocks from walk-forward')
+    parser.add_argument('--strategy', type=str, help='Show report for specific strategy')
+    parser.add_argument('--ticker', type=str, help='Show report for specific ticker')
+    
+    args = parser.parse_args()
+    
+    # Specific queries
+    if args.compare:
+        print_ticker_comparison(args.compare)
+        exit(0)
+    
+    if args.portfolio:
+        print_portfolio_report(num_stocks=args.portfolio)
+        exit(0)
+    
+    if args.strategy:
+        print_strategy_report(strategy=args.strategy)
+        exit(0)
+    
+    if args.ticker:
+        print_ticker_report(ticker=args.ticker)
+        exit(0)
+    
+    # Full reports
     print("Backtest Results Analysis")
     print("="*100)
     
-    # Overall strategy rankings
-    print_strategy_report()
+    # Standard backtest reports (if --walk-forward not specified)
+    if not args.walk_forward:
+        # Overall strategy rankings
+        print_strategy_report()
+        
+        # Overall ticker rankings
+        print("\n")
+        print_ticker_report()
+        
+        # Top 5 strategies
+        print(f"\n{'='*100}")
+        print("TOP 5 STRATEGIES (by Sharpe Ratio)")
+        print(f"{'='*100}\n")
+        top_5 = top_strategies(n=5, metric='sharpe')
+        print(top_5[['strategy', 'count', 'avg_return', 'avg_sharpe', 'positive_tickers', 'beats_buy_hold']].to_string())
+        
+        # Example: Compare two strategies
+        try:
+            top_strats = top_5['strategy'].tolist()
+            if len(top_strats) >= 2:
+                print_comparison(top_strats[0], top_strats[1])
+        except:
+            pass
     
-    # Overall ticker rankings
-    print("\n")
-    print_ticker_report()
-    
-    # Top 5 strategies
-    print(f"\n{'='*100}")
-    print("TOP 5 STRATEGIES (by Sharpe Ratio)")
-    print(f"{'='*100}\n")
-    top_5 = top_strategies(n=5, metric='sharpe')
-    print(top_5[['strategy', 'count', 'avg_return', 'avg_sharpe', 'positive_tickers', 'beats_buy_hold']].to_string())
-    
-    # Example: Compare two strategies
-    try:
-        top_strats = top_5['strategy'].tolist()
-        if len(top_strats) >= 2:
-            print_comparison(top_strats[0], top_strats[1])
-    except:
-        pass
+    # Walk-forward reports (if --standard not specified)
+    if not args.standard:
+        print_walk_forward_report()
+        print_portfolio_report(num_stocks=10)
     
     print(f"\n{'='*100}")
     print("Analysis complete!")
     print(f"{'='*100}\n")
+    
+    # Helpful tips
+    if not args.standard and not args.walk_forward:
+        print("\n💡 Tip: Use --walk-forward to see only walk-forward analysis")
+        print("💡 Tip: Use --standard to see only standard backtest results")
+        print("💡 Tip: Use --compare AAPL to compare both methods for a ticker")
+        print("💡 Tip: Use --portfolio 15 to generate a 15-stock portfolio\n")
