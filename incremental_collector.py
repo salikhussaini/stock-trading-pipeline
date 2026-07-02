@@ -263,7 +263,6 @@ def safe_yf_download_batch(tickers, start, end, retries=3):
                 auto_adjust=False,
                 progress=False,
                 threads=False,
-                show_errors=False,
                 session=yf_session,
                 group_by='ticker'  # Group by ticker for multi-ticker downloads
             )
@@ -370,7 +369,6 @@ def safe_yf_download(ticker, start, end, retries=3):
                     auto_adjust=False,
                     progress=False,
                     threads=False,
-                    show_errors=False,
                     session=yf_session  # Use cached session
                 )
 
