@@ -23,10 +23,47 @@ from logger_config import (
 )
 
 # =========================================================
-# SESSION CACHING (reduces API calls by ~30%)
+# ROTATING USER AGENTS & REALISTIC HEADERS
 # =========================================================
-yf_session = requests.Session()
-yf_session.headers.update({'User-Agent': 'Mozilla/5.0'})
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+]
+
+current_ua_index = 0
+ua_lock = threading.Lock()
+
+def get_next_user_agent():
+    """Rotate through user agents"""
+    global current_ua_index
+    with ua_lock:
+        ua = USER_AGENTS[current_ua_index]
+        current_ua_index = (current_ua_index + 1) % len(USER_AGENTS)
+        return ua
+
+def create_session():
+    """Create a session with realistic browser headers"""
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': get_next_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Referer': 'https://finance.yahoo.com',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+    })
+    return session
+
+yf_session = create_session()
+session_refresh_counter = 0
+session_lock = threading.Lock()
 
 # ================================================================
 # HELPERS
@@ -81,6 +118,16 @@ def decrease_delay():
     global global_delay
     with delay_lock:
         global_delay = max(0.5, global_delay - 0.1)  # Increased minimum
+
+def refresh_session_if_needed():
+    """Refresh session periodically to rotate user agent"""
+    global yf_session, session_refresh_counter
+    with session_lock:
+        session_refresh_counter += 1
+        if session_refresh_counter >= 20:  # Refresh every 20 requests
+            yf_session = create_session()
+            session_refresh_counter = 0
+            log_info(f"Session refreshed with new user agent")
 
 # =========================================================
 # LOG QUEUE - REMOVED (using global logger instead)
@@ -188,6 +235,72 @@ overall_start = time.perf_counter()
 # =========================================================
 # SAFE DOWNLOAD
 # =========================================================
+def safe_yf_download_batch(tickers, start, end, retries=3):
+    """
+    Download multiple tickers in ONE request (more efficient, fewer rate limits).
+    Returns dict mapping ticker -> DataFrame.
+    """
+    global rate_limit_cooldown
+    base_delay = 2.0
+    
+    # Check if we're in cooldown
+    if rate_limit_cooldown > 0:
+        cooldown_remaining = rate_limit_cooldown - time.time()
+        if cooldown_remaining > 0:
+            time.sleep(cooldown_remaining)
+            rate_limit_cooldown = 0
+    
+    refresh_session_if_needed()
+    
+    for retry in range(retries):
+        try:
+            # Download multiple tickers at once
+            df = yf.download(
+                tickers,  # List of tickers
+                start=start.strftime("%Y-%m-%d") if hasattr(start, 'strftime') else start,
+                end=end.strftime("%Y-%m-%d") if hasattr(end, 'strftime') else end,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                show_errors=False,
+                session=yf_session,
+                group_by='ticker'  # Group by ticker for multi-ticker downloads
+            )
+            
+            if df is not None and not df.empty:
+                decrease_delay()
+                
+                # If only one ticker, df structure is different
+                if len(tickers) == 1:
+                    return {tickers[0]: df}
+                
+                # Parse multi-ticker result
+                result = {}
+                for ticker in tickers:
+                    try:
+                        ticker_df = df[ticker] if len(tickers) > 1 else df
+                        if ticker_df is not None and not ticker_df.empty:
+                            result[ticker] = ticker_df
+                    except (KeyError, IndexError):
+                        result[ticker] = None
+                
+                return result
+                
+        except Exception as e:
+            error_str = str(e)
+            
+            if '429' in error_str or 'Too Many Requests' in error_str:
+                log_warning(f"Rate limit hit (batch), backing off...")
+                increase_delay()
+                rate_limit_cooldown = time.time() + 30
+                time.sleep(30 + random.uniform(0, 10))
+                continue
+            
+            time.sleep(base_delay * (2 ** retry) + random.uniform(0, 1))
+    
+    return {ticker: None for ticker in tickers}
+
 def safe_yf_download(ticker, start, end, retries=3):
     """
     Download data from yfinance with intelligent fallback.
@@ -196,6 +309,8 @@ def safe_yf_download(ticker, start, end, retries=3):
     """
     global rate_limit_cooldown
     base_delay = 1.5  # Increased from 1.0
+    
+    refresh_session_if_needed()
 
     # ensure start/end are date objects
     if isinstance(start, str):
@@ -459,7 +574,128 @@ def process_ticker(ticker):
 # Logging is now handled by logger_config.py
 
 # =========================================================
-# PARALLEL EXECUTION
+# BATCH PROCESSING (Download multiple tickers per request)
+# =========================================================
+
+def process_ticker_batch(ticker_batch):
+    """
+    Process multiple tickers in one API call (more efficient).
+    """
+    # Get date ranges for each ticker
+    conn = duckdb.connect(str(DB_PATH))
+    
+    ticker_date_ranges = {}
+    tickers_to_download = []
+    
+    for ticker in ticker_batch:
+        try:
+            latest = conn.execute("""
+                SELECT last_date FROM ticker_state WHERE ticker = ?
+            """, [ticker]).fetchone()
+            
+            if not latest or latest[0] is None:
+                start_date = date(2000, 1, 1)
+            else:
+                ld = latest[0]
+                if isinstance(ld, datetime):
+                    start_date = (ld + timedelta(days=1)).date()
+                else:
+                    start_date = ld + timedelta(days=1)
+            
+            end_date = get_last_trading_day()
+            
+            if start_date < end_date:
+                ticker_date_ranges[ticker] = (start_date, end_date)
+                tickers_to_download.append(ticker)
+            else:
+                log_info(f"{ticker} | SKIPPED | Up to date")
+        except Exception as e:
+            log_error(f"{ticker} | ERROR checking state: {e}")
+    
+    conn.close()
+    
+    if not tickers_to_download:
+        return
+    
+    # Download all tickers at once
+    with delay_lock:
+        delay = global_delay
+    
+    time.sleep(delay + random.uniform(0.2, 0.8))
+    
+    # Use the earliest start date and latest end date for batch
+    earliest_start = min(ticker_date_ranges[t][0] for t in tickers_to_download)
+    latest_end = max(ticker_date_ranges[t][1] for t in tickers_to_download)
+    
+    log_info(f"Batch download: {tickers_to_download} ({len(tickers_to_download)} tickers)")
+    
+    results = safe_yf_download_batch(tickers_to_download, earliest_start, latest_end)
+    
+    # Process each ticker's result
+    for ticker in tickers_to_download:
+        df = results.get(ticker)
+        
+        if df is None or df.empty:
+            log_warning(f"{ticker} | No data from batch download")
+            # Fall back to individual download
+            process_ticker(ticker)
+            continue
+        
+        # Process the data (same as before)
+        try:
+            conn = duckdb.connect(str(DB_PATH))
+            
+            df = df.reset_index()
+            df.columns = [c.lower() for c in df.columns]
+            df["ticker"] = ticker
+            df = df.rename(columns={"adj close": "adj_close"})
+            df = df[["ticker", "date", "open", "high", "low", "close", "adj_close", "volume"]]
+            
+            min_date = df["date"].min()
+            max_date = df["date"].max()
+            
+            conn.execute("""
+                DELETE FROM daily_prices WHERE ticker = ? AND date >= ? AND date <= ?
+            """, [ticker, min_date, max_date])
+            
+            conn.append("daily_prices", df)
+            
+            last_date = df["date"].max()
+            if isinstance(last_date, (datetime, date)):
+                last_date_val = last_date.strftime("%Y-%m-%d")
+            else:
+                last_date_val = str(last_date)
+            
+            conn.execute("""
+                MERGE INTO ticker_state AS t
+                USING (SELECT ? AS ticker, ?::DATE AS last_date) AS s
+                ON t.ticker = s.ticker
+                WHEN MATCHED THEN UPDATE SET last_date = s.last_date
+                WHEN NOT MATCHED THEN INSERT (ticker, last_date) VALUES (s.ticker, s.last_date)
+            """, [ticker, last_date_val])
+            
+            conn.close()
+            
+            with metrics_lock:
+                global success, total_rows
+                success += 1
+                total_rows += len(df)
+            
+            log_info(f"{ticker} | SUCCESS | rows={len(df)} (batch)")
+            
+        except Exception as e:
+            log_error(f"{ticker} | FAILED | {e}")
+            with metrics_lock:
+                global failed
+                failed += 1
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+
+# =========================================================
+# PARALLEL EXECUTION WITH BATCHING
 # =========================================================
 
 log_pipeline_start(
@@ -468,13 +704,19 @@ log_pipeline_start(
     tickers=len(tickers)
 )
 
+# Batch tickers (5-10 per batch to balance efficiency and API limits)
+BATCH_SIZE = 100
+ticker_batches = [tickers[i:i+BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
+
+log_info(f"Using batch mode: {len(ticker_batches)} batches of ~{BATCH_SIZE} tickers")
+
 with ThreadPoolExecutor(max_workers=args.workers) as executor:
-    futures = [executor.submit(process_ticker, t) for t in tickers]
+    futures = [executor.submit(process_ticker_batch, batch) for batch in ticker_batches]
     for fut in as_completed(futures):
         try:
             fut.result()
         except Exception as e:
-            log_exception(e, "Worker exception")
+            log_exception(e, "Batch worker exception")
 
 # =========================================================
 # SUMMARY
