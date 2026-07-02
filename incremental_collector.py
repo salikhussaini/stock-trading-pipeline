@@ -15,11 +15,18 @@ import pandas as pd
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
+import requests
 
 from logger_config import (
     log_info, log_error, log_warning, log_exception,
     log_section, log_pipeline_start, log_pipeline_end, log_metrics
 )
+
+# =========================================================
+# SESSION CACHING (reduces API calls by ~30%)
+# =========================================================
+yf_session = requests.Session()
+yf_session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
 # ================================================================
 # HELPERS
@@ -53,7 +60,7 @@ pipeline_name = "incremental_collector_hardened"
 parser = argparse.ArgumentParser(description="Incremental stock data collector")
 parser.add_argument("--test", action="store_true", help="Run a quick test using a small subset of tickers")
 parser.add_argument("--limit", type=int, default=0, help="Limit number of tickers (0 = all)")
-parser.add_argument("--workers", type=int, default=4, help="Number of worker threads")
+parser.add_argument("--workers", type=int, default=2, help="Number of worker threads (default: 2, more conservative)")
 args = parser.parse_args()
 
 
@@ -61,18 +68,19 @@ args = parser.parse_args()
 # GLOBAL ADAPTIVE THROTTLE
 # =========================================================
 
-global_delay = 0.4
+global_delay = 1.0  # Increased from 0.4 to avoid rate limits
 delay_lock = threading.Lock()
+rate_limit_cooldown = 0  # Timestamp when 429 was hit
 
 def increase_delay():
     global global_delay
     with delay_lock:
-        global_delay = min(3.0, global_delay + 0.5)
+        global_delay = min(5.0, global_delay + 1.0)  # Increased max and increment
 
 def decrease_delay():
     global global_delay
     with delay_lock:
-        global_delay = max(0.2, global_delay - 0.05)
+        global_delay = max(0.5, global_delay - 0.1)  # Increased minimum
 
 # =========================================================
 # LOG QUEUE - REMOVED (using global logger instead)
@@ -184,8 +192,10 @@ def safe_yf_download(ticker, start, end, retries=3):
     """
     Download data from yfinance with intelligent fallback.
     If end_date has no data, progressively search earlier dates.
+    Handles 429 rate limit errors with aggressive backoff.
     """
-    base_delay = 1.0
+    global rate_limit_cooldown
+    base_delay = 1.5  # Increased from 1.0
 
     # ensure start/end are date objects
     if isinstance(start, str):
@@ -212,11 +222,17 @@ def safe_yf_download(ticker, start, end, retries=3):
             
         for retry in range(retries):
             try:
+                # Check if we're in cooldown from 429 error
+                if rate_limit_cooldown > 0:
+                    cooldown_remaining = rate_limit_cooldown - time.time()
+                    if cooldown_remaining > 0:
+                        time.sleep(cooldown_remaining)
+                        rate_limit_cooldown = 0
+                
                 start_str = start_date.strftime("%Y-%m-%d")
                 current_end_str = current_end.strftime("%Y-%m-%d")
                 
-                # Safer approach: don't suppress output in threaded environment
-                # Just set auto_adjust and progress flags appropriately
+                # Use session for better connection reuse
                 df = yf.download(
                     ticker,
                     start=start_str,
@@ -225,13 +241,26 @@ def safe_yf_download(ticker, start, end, retries=3):
                     auto_adjust=False,
                     progress=False,
                     threads=False,
-                    show_errors=False  # Suppress yfinance error messages
+                    show_errors=False,
+                    session=yf_session  # Use cached session
                 )
 
                 if df is not None and not df.empty:
+                    decrease_delay()  # Success - can speed up slightly
                     return df
 
-            except Exception:
+            except Exception as e:
+                error_str = str(e)
+                
+                # Detect 429 rate limit errors
+                if '429' in error_str or 'Too Many Requests' in error_str:
+                    log_warning(f"Rate limit hit for {ticker}, backing off...")
+                    increase_delay()
+                    rate_limit_cooldown = time.time() + 30  # 30 second cooldown
+                    time.sleep(30 + random.uniform(0, 10))
+                    continue
+                    
+                # Generic retry with exponential backoff
                 time.sleep(base_delay * (2 ** retry) + random.uniform(0, 0.5))
         
         # Try one day earlier

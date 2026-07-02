@@ -31,7 +31,7 @@ NC='\033[0m' # No Color
 SKIP_DOWNLOAD=false
 SKIP_TELEGRAM=false
 TEST_MODE=false
-WORKERS=4
+WORKERS=2  # Reduced from 4 to avoid rate limits
 
 # =========================================================
 # HELPER FUNCTIONS
@@ -47,14 +47,14 @@ OPTIONS:
     --skip-download     Skip data download step (use existing data)
     --skip-telegram     Skip sending Telegram notifications
     --test              Test mode (process only 10 tickers)
-    --workers N         Number of parallel workers (default: 4)
+    --workers N         Number of parallel workers (default: 2)
     --help              Show this help message
 
 EXAMPLES:
     $0                          # Full pipeline with defaults
     $0 --test                   # Quick test with 10 tickers
     $0 --skip-download          # Skip download, run features + backtest
-    $0 --workers 8              # Use 8 parallel workers
+    $0 --workers 4              # Use 4 parallel workers (higher rate limit risk)
 
 EOF
     exit 0
