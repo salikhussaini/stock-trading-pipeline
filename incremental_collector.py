@@ -98,6 +98,7 @@ parser = argparse.ArgumentParser(description="Incremental stock data collector")
 parser.add_argument("--test", action="store_true", help="Run a quick test using a small subset of tickers")
 parser.add_argument("--limit", type=int, default=0, help="Limit number of tickers (0 = all)")
 parser.add_argument("--workers", type=int, default=2, help="Number of worker threads (default: 2, more conservative)")
+parser.add_argument("--batch-size", type=int, default=0, help="Tickers per batch download request (0 = disabled, use individual downloads)")
 args = parser.parse_args()
 
 
@@ -731,16 +732,31 @@ def _process_ticker_batch_impl(ticker_batch):
 log_pipeline_start(
     "Incremental Collector",
     workers=args.workers,
-    tickers=len(tickers)
+    tickers=len(tickers),
+    batch_size=args.batch_size or "disabled"
 )
 
-with ThreadPoolExecutor(max_workers=args.workers) as executor:
-    futures = [executor.submit(process_ticker, t) for t in tickers]
-    for fut in as_completed(futures):
-        try:
-            fut.result()
-        except Exception as e:
-            log_exception(e, "Worker exception")
+if args.batch_size and args.batch_size > 1:
+    ticker_batches = [
+        tickers[i:i + args.batch_size]
+        for i in range(0, len(tickers), args.batch_size)
+    ]
+    log_info(f"Batch mode: {len(ticker_batches)} batches of up to {args.batch_size} tickers")
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = [executor.submit(process_ticker_batch, batch) for batch in ticker_batches]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                log_exception(e, "Worker exception")
+else:
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = [executor.submit(process_ticker, t) for t in tickers]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                log_exception(e, "Worker exception")
 
 # =========================================================
 # SUMMARY
