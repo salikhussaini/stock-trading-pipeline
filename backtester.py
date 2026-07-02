@@ -809,7 +809,8 @@ def run_walk_forward_batch(
     limit: int = None,
     train_days: int = 252,
     test_days: int = 63,
-    step_days: int = 21
+    step_days: int = 21,
+    force_rerun: bool = False
 ) -> pd.DataFrame:
     """
     Run walk-forward analysis on multiple tickers.
@@ -822,11 +823,31 @@ def run_walk_forward_batch(
         train_days: Training window (252 = 1 year)
         test_days: Testing window (63 = 1 quarter)
         step_days: Roll forward step (21 = 1 month)
+        force_rerun: Force re-run even if cached results exist
     
     Returns:
         DataFrame with ranked results
     """
     conn = duckdb.connect(str(DB_PATH))
+    
+    # Load existing results for caching
+    output_path = Path(__file__).parent / "walk_forward_results.csv"
+    existing_results = []
+    cached_tickers = set()
+    
+    if output_path.exists() and not force_rerun:
+        try:
+            existing_df = pd.read_csv(output_path)
+            # Filter by matching strategy and parameters
+            cached = existing_df[
+                (existing_df['strategy'] == strategy_name)
+            ]
+            cached_tickers = set(cached['ticker'].tolist())
+            existing_results = cached.to_dict('records')
+            if cached_tickers:
+                log_info(f"Found {len(cached_tickers)} cached results for {strategy_name}")
+        except Exception as e:
+            log_warning(f"Could not load cached results: {e}")
     
     # Get tickers
     if tickers is None:
@@ -838,19 +859,26 @@ def run_walk_forward_batch(
     if limit:
         all_tickers = all_tickers[:limit]
     
+    # Separate tickers into cached and to-analyze
+    tickers_to_analyze = [t for t in all_tickers if t not in cached_tickers]
+    skipped = len(all_tickers) - len(tickers_to_analyze)
+    
     log_pipeline_start(
         "Walk-Forward Analysis",
         strategy=strategy_name,
-        tickers=len(all_tickers),
+        tickers=len(tickers_to_analyze),
         train_days=train_days,
         test_days=test_days,
         step_days=step_days
     )
     
-    results = []
+    if skipped > 0:
+        log_info(f"Skipping {skipped} tickers (already cached)")
     
-    for idx, ticker in enumerate(all_tickers, 1):
-        log_info(f"[{idx}/{len(all_tickers)}] Analyzing {ticker}...")
+    results = existing_results.copy()  # Start with cached results
+    
+    for idx, ticker in enumerate(tickers_to_analyze, 1):
+        log_info(f"[{idx}/{len(tickers_to_analyze)}] Analyzing {ticker}...")
         
         # Load ticker data
         query = f"""
@@ -1576,7 +1604,7 @@ Examples:
     parser.add_argument(
         '--force-rerun',
         action='store_true',
-        help='Force re-run without using cached results (standard backtest only)'
+        help='Force re-run without using cached results (works for both standard and walk-forward)'
     )
     
     parser.add_argument(
@@ -1622,7 +1650,8 @@ Examples:
             limit=args.limit,
             train_days=args.train_days,
             test_days=args.test_days,
-            step_days=args.step_days
+            step_days=args.step_days,
+            force_rerun=args.force_rerun
         )
         
         if not results.empty:
