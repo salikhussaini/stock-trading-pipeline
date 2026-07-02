@@ -327,7 +327,8 @@ def query_walk_forward(
     min_consistency: float = 0.0,
     min_return: float = None,
     min_sharpe: float = None,
-    only_buy_candidates: bool = False
+    only_buy_candidates: bool = False,
+    strategy: str = None
 ) -> pd.DataFrame:
     """
     Query walk-forward analysis results with filtering.
@@ -338,6 +339,7 @@ def query_walk_forward(
         min_return: Minimum total return threshold
         min_sharpe: Minimum average Sharpe ratio
         only_buy_candidates: Filter for stocks meeting buy criteria
+        strategy: Filter by strategy name (None = all strategies)
     
     Returns:
         Filtered and sorted DataFrame
@@ -346,6 +348,10 @@ def query_walk_forward(
     
     if df.empty:
         return df
+    
+    # Apply strategy filter
+    if strategy and 'strategy' in df.columns:
+        df = df[df['strategy'] == strategy]
     
     # Apply filters
     if min_consistency > 0:
@@ -488,7 +494,8 @@ def rank_stocks_by_robustness(top_n: int = 20) -> pd.DataFrame:
 def portfolio_from_walk_forward(
     num_stocks: int = 10,
     min_consistency: float = 0.5,
-    allocation_method: str = 'equal'
+    allocation_method: str = 'equal',
+    strategy: str = None
 ) -> pd.DataFrame:
     """
     Generate portfolio allocation from walk-forward results.
@@ -497,12 +504,13 @@ def portfolio_from_walk_forward(
         num_stocks: Number of stocks in portfolio
         min_consistency: Minimum consistency requirement
         allocation_method: 'equal' or 'score_weighted'
+        strategy: Filter by strategy name (None = all strategies)
     
     Returns:
         DataFrame with portfolio allocations
     """
-    # Get buy candidates
-    df = get_buy_recommendations()
+    # Get buy candidates with strategy filter
+    df = query_walk_forward(only_buy_candidates=True, strategy=strategy)
     
     if df.empty:
         print("⚠️  No stocks meet buy criteria")
@@ -523,10 +531,12 @@ def portfolio_from_walk_forward(
     
     portfolio['allocation_pct'] = portfolio['allocation'] * 100
     
-    return portfolio[
-        ['ticker', 'total_return', 'consistency', 'avg_sharpe', 
-         'composite_score', 'allocation_pct']
-    ]
+    cols = ['ticker', 'total_return', 'consistency', 'avg_sharpe', 
+             'composite_score', 'allocation_pct']
+    if 'strategy' in portfolio.columns:
+        cols.insert(1, 'strategy')
+    
+    return portfolio[cols]
 
 # =========================================================
 # REPORTING FUNCTIONS
@@ -590,19 +600,37 @@ def print_comparison(strategy1: str, strategy2: str):
     print(f"{strategy1:20}: {s1_wins}/{total} wins ({s1_wins/total*100:.1f}%)")
     print(f"{strategy2:20}: {s2_wins}/{total} wins ({s2_wins/total*100:.1f}%)")
 
-def print_walk_forward_report():
-    """Print detailed walk-forward analysis report."""
-    df = load_walk_forward_results()
+def print_walk_forward_report(strategy: str = None):
+    """
+    Print detailed walk-forward analysis report.
+    
+    Args:
+        strategy: Filter by strategy name (None = all strategies)
+    """
+    df = query_walk_forward(strategy=strategy) if strategy else load_walk_forward_results()
     
     if df.empty:
         return
     
+    strategy_label = f" ({strategy})" if strategy else ""
     print(f"\n{'='*100}")
-    print("WALK-FORWARD ANALYSIS REPORT")
+    print(f"WALK-FORWARD ANALYSIS REPORT{strategy_label}")
     print(f"{'='*100}\n")
     
+    # Show unique strategies if multiple exist
+    if 'strategy' in df.columns and not strategy:
+        strategies = df['strategy'].unique()
+        print(f"Strategies: {', '.join(strategies)}")
+    
     print(f"Total Stocks Analyzed: {len(df)}")
-    print(f"Buy Candidates: {len(get_buy_recommendations())}")
+    
+    # Get buy recommendations with strategy filter
+    buy_recs = df[
+        (df['consistency'] >= 0.5) &
+        (df['total_return'] > 0) &
+        (df['avg_sharpe'] > 0.5)
+    ]
+    print(f"Buy Candidates: {len(buy_recs)}")
     print(f"Avg Consistency: {df['consistency'].mean()*100:.1f}%")
     print(f"Median Return: {df['total_return'].median()*100:+.2f}%")
     
@@ -616,10 +644,12 @@ def print_walk_forward_report():
     top_10['avg_sharpe'] = top_10['avg_sharpe'].apply(lambda x: f"{x:.2f}")
     top_10['composite_score'] = top_10['composite_score'].apply(lambda x: f"{x:.3f}")
     
-    print(top_10[['ticker', 'total_return', 'consistency', 'avg_sharpe', 'composite_score']].to_string(index=False))
+    display_cols = ['ticker', 'total_return', 'consistency', 'avg_sharpe', 'composite_score']
+    if 'strategy' in top_10.columns:
+        display_cols.insert(1, 'strategy')
+    print(top_10[display_cols].to_string(index=False))
     
     # Buy recommendations
-    buy_recs = get_buy_recommendations()
     if not buy_recs.empty:
         print(f"\n{'-'*100}")
         print(f"BUY RECOMMENDATIONS ({len(buy_recs)} stocks)")
@@ -631,17 +661,27 @@ def print_walk_forward_report():
         buy_display['avg_sharpe'] = buy_display['avg_sharpe'].apply(lambda x: f"{x:.2f}")
         buy_display['composite_score'] = buy_display['composite_score'].apply(lambda x: f"{x:.3f}")
         
-        print(buy_display[['ticker', 'total_return', 'consistency', 'avg_sharpe', 'composite_score']].to_string(index=False))
+        display_cols = ['ticker', 'total_return', 'consistency', 'avg_sharpe', 'composite_score']
+        if 'strategy' in buy_display.columns:
+            display_cols.insert(1, 'strategy')
+        print(buy_display[display_cols].to_string(index=False))
 
-def print_portfolio_report(num_stocks: int = 10):
-    """Print portfolio allocation based on walk-forward results."""
-    portfolio = portfolio_from_walk_forward(num_stocks=num_stocks, allocation_method='score_weighted')
+def print_portfolio_report(num_stocks: int = 10, strategy: str = None):
+    """
+    Print portfolio allocation based on walk-forward results.
+    
+    Args:
+        num_stocks: Number of stocks in portfolio
+        strategy: Filter by strategy name (None = all strategies)
+    """
+    portfolio = portfolio_from_walk_forward(num_stocks=num_stocks, allocation_method='score_weighted', strategy=strategy)
     
     if portfolio.empty:
         return
     
+    strategy_label = f" ({strategy})" if strategy else ""
     print(f"\n{'='*100}")
-    print(f"RECOMMENDED PORTFOLIO ({num_stocks} stocks, score-weighted)")
+    print(f"RECOMMENDED PORTFOLIO ({num_stocks} stocks, score-weighted){strategy_label}")
     print(f"{'='*100}\n")
     
     portfolio_display = portfolio.copy()
@@ -739,7 +779,8 @@ Examples:
     parser.add_argument('--walk-forward', action='store_true', help='Show walk-forward analysis only')
     parser.add_argument('--compare', type=str, help='Compare walk-forward vs standard for ticker')
     parser.add_argument('--portfolio', type=int, help='Generate portfolio with N stocks from walk-forward')
-    parser.add_argument('--strategy', type=str, help='Show report for specific strategy')
+    parser.add_argument('--wf-strategy', type=str, help='Filter walk-forward results by strategy (rsi_classic, macd_only, bollinger_bands, etc.)')
+    parser.add_argument('--strategy', type=str, help='Show report for specific strategy (standard backtest)')
     parser.add_argument('--ticker', type=str, help='Show report for specific ticker')
     
     args = parser.parse_args()
@@ -750,7 +791,7 @@ Examples:
         exit(0)
     
     if args.portfolio:
-        print_portfolio_report(num_stocks=args.portfolio)
+        print_portfolio_report(num_stocks=args.portfolio, strategy=args.wf_strategy)
         exit(0)
     
     if args.strategy:
@@ -791,8 +832,8 @@ Examples:
     
     # Walk-forward reports (if --standard not specified)
     if not args.standard:
-        print_walk_forward_report()
-        print_portfolio_report(num_stocks=10)
+        print_walk_forward_report(strategy=args.wf_strategy)
+        print_portfolio_report(num_stocks=10, strategy=args.wf_strategy)
     
     print(f"\n{'='*100}")
     print("Analysis complete!")

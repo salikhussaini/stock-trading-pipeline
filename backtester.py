@@ -533,6 +533,112 @@ def optimize_rsi_params(df: pd.DataFrame) -> Dict:
     
     return best_params
 
+def optimize_macd_params(df: pd.DataFrame) -> Dict:
+    """
+    Optimize MACD signal thresholds on training data.
+    Grid search over histogram threshold for entry.
+    
+    Returns best parameters based on Sharpe ratio.
+    """
+    best_sharpe = -999
+    best_params = {'histogram_threshold': 0}
+    
+    # Grid search over histogram thresholds
+    for hist_thresh in [-0.5, -0.3, -0.1, 0, 0.1, 0.3, 0.5]:
+        test_df = df.copy()
+        test_df['signal'] = 0
+        
+        # BUY when MACD crosses above signal AND histogram > threshold
+        macd_buy = (test_df['macd'] > test_df['macd_signal']) & (test_df['macd_histogram'] > hist_thresh)
+        # SELL when MACD crosses below signal AND histogram < -threshold
+        macd_sell = (test_df['macd'] < test_df['macd_signal']) & (test_df['macd_histogram'] < -hist_thresh)
+        
+        test_df.loc[macd_buy, 'signal'] = 1
+        test_df.loc[macd_sell, 'signal'] = -1
+        
+        result = backtest_strategy(test_df, initial_capital=10000)
+        
+        if 'error' not in result and result['sharpe_ratio'] > best_sharpe:
+            best_sharpe = result['sharpe_ratio']
+            best_params = {'histogram_threshold': hist_thresh}
+    
+    return best_params
+
+def optimize_bb_params(df: pd.DataFrame) -> Dict:
+    """
+    Optimize Bollinger Bands position thresholds on training data.
+    Grid search over upper/lower band position thresholds.
+    
+    Returns best parameters based on Sharpe ratio.
+    """
+    best_sharpe = -999
+    best_params = {'lower_threshold': 0.2, 'upper_threshold': 0.8}
+    
+    # Grid search over BB position thresholds
+    for lower_thresh in [0.1, 0.15, 0.2, 0.25, 0.3]:
+        for upper_thresh in [0.7, 0.75, 0.8, 0.85, 0.9]:
+            if upper_thresh <= lower_thresh:
+                continue
+            
+            test_df = df.copy()
+            test_df['signal'] = 0
+            
+            # BUY when price hits lower band
+            test_df.loc[test_df['bb_position'] < lower_thresh, 'signal'] = 1
+            # SELL when price hits upper band
+            test_df.loc[test_df['bb_position'] > upper_thresh, 'signal'] = -1
+            
+            result = backtest_strategy(test_df, initial_capital=10000)
+            
+            if 'error' not in result and result['sharpe_ratio'] > best_sharpe:
+                best_sharpe = result['sharpe_ratio']
+                best_params = {'lower_threshold': lower_thresh, 'upper_threshold': upper_thresh}
+    
+    return best_params
+
+def optimize_ma_crossover_params(df: pd.DataFrame) -> Dict:
+    """
+    Optimize Moving Average crossover pair on training data.
+    Tests different MA combinations to find best performing pair.
+    
+    Returns best parameters based on Sharpe ratio.
+    """
+    best_sharpe = -999
+    best_params = {'short_ma': 'sma_10', 'long_ma': 'sma_50'}
+    
+    # Test different MA combinations
+    ma_pairs = [
+        ('sma_10', 'sma_20'),
+        ('sma_10', 'sma_50'),
+        ('sma_20', 'sma_50'),
+        ('ema_10', 'ema_20'),
+        ('ema_10', 'sma_50'),
+    ]
+    
+    for short_ma, long_ma in ma_pairs:
+        # Skip if columns don't exist
+        if short_ma not in df.columns or long_ma not in df.columns:
+            continue
+        
+        test_df = df.copy()
+        test_df['signal'] = 0
+        
+        # BUY when short MA crosses above long MA
+        buy = (test_df[short_ma] > test_df[long_ma]) & (test_df[short_ma].shift(1) <= test_df[long_ma].shift(1))
+        # SELL when short MA crosses below long MA
+        sell = (test_df[short_ma] < test_df[long_ma]) & (test_df[short_ma].shift(1) >= test_df[long_ma].shift(1))
+        
+        test_df.loc[buy, 'signal'] = 1
+        test_df.loc[sell, 'signal'] = -1
+        
+        result = backtest_strategy(test_df, initial_capital=10000)
+        
+        if 'error' not in result and result['sharpe_ratio'] > best_sharpe:
+            best_sharpe = result['sharpe_ratio']
+            best_params = {'short_ma': short_ma, 'long_ma': long_ma}
+    
+    return best_params
+
 def walk_forward_analysis(
     df: pd.DataFrame,
     strategy_name: str = 'rsi_classic',
@@ -549,9 +655,16 @@ def walk_forward_analysis(
     3. Roll forward by 1 month
     4. Repeat until end of data
     
+    Supported Strategies with Optimization:
+    - 'rsi_classic': Optimizes buy/sell thresholds
+    - 'macd_only': Optimizes histogram threshold
+    - 'bollinger_bands': Optimizes band position thresholds
+    - 'sma_crossover', 'ema_crossover', 'ma_crossover': Optimizes MA pair selection
+    - Other strategies: Uses fixed parameters (no optimization)
+    
     Args:
         df: Historical data (must have 'report_date' sorted)
-        strategy_name: Strategy to test (currently supports 'rsi_classic')
+        strategy_name: Strategy to test
         train_days: Training window size (252 = 1 year)
         test_days: Testing window size (63 = 1 quarter)
         step_days: Roll forward step (21 = 1 month)
@@ -585,13 +698,43 @@ def walk_forward_analysis(
         test_start = test_df.iloc[0]['report_date']
         test_end = test_df.iloc[-1]['report_date']
         
-        # Optimize on training data
+        # Optimize on training data based on strategy
         if strategy_name == 'rsi_classic':
             best_params = optimize_rsi_params(train_df)
-            # Apply to test data
             test_df = rsi_classic(test_df, **best_params)
+        
+        elif strategy_name == 'macd_only':
+            best_params = optimize_macd_params(train_df)
+            # Apply optimized MACD strategy to test data
+            test_df['signal'] = 0
+            hist_thresh = best_params['histogram_threshold']
+            macd_buy = (test_df['macd'] > test_df['macd_signal']) & (test_df['macd_histogram'] > hist_thresh)
+            macd_sell = (test_df['macd'] < test_df['macd_signal']) & (test_df['macd_histogram'] < -hist_thresh)
+            test_df.loc[macd_buy, 'signal'] = 1
+            test_df.loc[macd_sell, 'signal'] = -1
+        
+        elif strategy_name == 'bollinger_bands':
+            best_params = optimize_bb_params(train_df)
+            # Apply optimized Bollinger Bands strategy to test data
+            test_df['signal'] = 0
+            lower_thresh = best_params['lower_threshold']
+            upper_thresh = best_params['upper_threshold']
+            test_df.loc[test_df['bb_position'] < lower_thresh, 'signal'] = 1
+            test_df.loc[test_df['bb_position'] > upper_thresh, 'signal'] = -1
+        
+        elif strategy_name in ['sma_crossover', 'ema_crossover', 'ma_crossover']:
+            best_params = optimize_ma_crossover_params(train_df)
+            # Apply optimized MA crossover strategy to test data
+            test_df['signal'] = 0
+            short_ma = best_params['short_ma']
+            long_ma = best_params['long_ma']
+            buy = (test_df[short_ma] > test_df[long_ma]) & (test_df[short_ma].shift(1) <= test_df[long_ma].shift(1))
+            sell = (test_df[short_ma] < test_df[long_ma]) & (test_df[short_ma].shift(1) >= test_df[long_ma].shift(1))
+            test_df.loc[buy, 'signal'] = 1
+            test_df.loc[sell, 'signal'] = -1
+        
         else:
-            # Default: use fixed strategy
+            # Default: use fixed strategy (no optimization)
             strategy_func = STRATEGIES.get(strategy_name, rsi_classic)
             test_df = strategy_func(test_df)
             best_params = {}
@@ -753,6 +896,7 @@ def run_walk_forward_batch(
         if 'error' not in wf_result:
             results.append({
                 'ticker': ticker,
+                'strategy': strategy_name,
                 'total_return': wf_result['total_return'],
                 'buy_hold_return': wf_result['buy_hold_return'],
                 'avg_window_return': wf_result['avg_window_return'],
@@ -1449,17 +1593,25 @@ Examples:
         help='Walk-forward step size in days (default: 21 = 1 month)'
     )
     
+    parser.add_argument(
+        '--wf-strategy',
+        type=str,
+        default='rsi_classic',
+        choices=['rsi_classic', 'macd_only', 'bollinger_bands', 'sma_crossover', 'ema_crossover', 'ma_crossover'],
+        help='Walk-forward strategy (default: rsi_classic). Supported: rsi_classic, macd_only, bollinger_bands, sma_crossover, ema_crossover, ma_crossover'
+    )
+    
     args = parser.parse_args()
     
     # =========================================================
     # WALK-FORWARD ANALYSIS MODE
     # =========================================================
     if args.walk_forward:
-        log_info("Running WALK-FORWARD ANALYSIS mode (anti-overfitting)")
+        log_info(f"Running WALK-FORWARD ANALYSIS mode (anti-overfitting) with {args.wf_strategy}")
         
         results = run_walk_forward_batch(
             tickers=args.tickers,
-            strategy_name='rsi_classic',  # Currently only RSI supports parameter optimization
+            strategy_name=args.wf_strategy,
             limit=args.limit,
             train_days=args.train_days,
             test_days=args.test_days,

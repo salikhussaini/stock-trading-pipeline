@@ -141,7 +141,7 @@ def get_strategy_summary():
 # WALK-FORWARD QUERY FUNCTIONS (Anti-Overfitting)
 # =========================================================
 
-def get_walk_forward_buy_opportunities(limit=10):
+def get_walk_forward_buy_opportunities(limit=10, strategy=None):
     """
     Get buy recommendations from walk-forward analysis.
     These are more reliable than standard backtests (out-of-sample tested).
@@ -150,12 +150,20 @@ def get_walk_forward_buy_opportunities(limit=10):
     - Consistency >= 50% (profitable in ≥50% of test windows)
     - Total Return > 0%
     - Sharpe Ratio > 0.5
+    
+    Args:
+        limit: Number of recommendations to return
+        strategy: Filter by strategy name (None = all strategies)
     """
     if not WALK_FORWARD_CSV.exists():
         print(f"⚠️  Walk-forward results not found. Run: python backtester.py --walk-forward --limit 50")
         return pd.DataFrame()
     
     df = pd.read_csv(WALK_FORWARD_CSV)
+    
+    # Filter by strategy if specified
+    if strategy and 'strategy' in df.columns:
+        df = df[df['strategy'] == strategy]
     
     # Apply buy criteria
     buy_candidates = df[
@@ -169,7 +177,7 @@ def get_walk_forward_buy_opportunities(limit=10):
     
     return buy_candidates.head(limit)
 
-def get_walk_forward_conservative(limit=5):
+def get_walk_forward_conservative(limit=5, strategy=None):
     """
     Get highly conservative buy recommendations.
     
@@ -177,11 +185,19 @@ def get_walk_forward_conservative(limit=5):
     - Consistency >= 60% (very consistent)
     - Total Return > 5%
     - Sharpe Ratio > 0.7
+    
+    Args:
+        limit: Number of recommendations to return
+        strategy: Filter by strategy name (None = all strategies)
     """
     if not WALK_FORWARD_CSV.exists():
         return pd.DataFrame()
     
     df = pd.read_csv(WALK_FORWARD_CSV)
+    
+    # Filter by strategy if specified
+    if strategy and 'strategy' in df.columns:
+        df = df[df['strategy'] == strategy]
     
     conservative = df[
         (df['consistency'] >= 0.6) &
@@ -191,19 +207,27 @@ def get_walk_forward_conservative(limit=5):
     
     return conservative.nlargest(limit, 'composite_score')
 
-def get_walk_forward_aggressive(limit=5):
+def get_walk_forward_aggressive(limit=5, strategy=None):
     """
     Get aggressive high-return candidates.
-    
+    `
     Filters for:
     - Total Return > 15%
     - Sharpe Ratio > 0.8
     - Consistency >= 45% (slightly lower, accepting more volatility)
+    
+    Args:
+        limit: Number of recommendations to return
+        strategy: Filter by strategy name (None = all strategies)
     """
     if not WALK_FORWARD_CSV.exists():
         return pd.DataFrame()
     
     df = pd.read_csv(WALK_FORWARD_CSV)
+    
+    # Filter by strategy if specified
+    if strategy and 'strategy' in df.columns:
+        df = df[df['strategy'] == strategy]
     
     aggressive = df[
         (df['total_return'] > 0.15) &
@@ -213,12 +237,16 @@ def get_walk_forward_aggressive(limit=5):
     
     return aggressive.nlargest(limit, 'total_return')
 
-def get_walk_forward_portfolio(num_stocks=10):
+def get_walk_forward_portfolio(num_stocks=10, strategy=None):
     """
     Get portfolio allocation based on walk-forward results.
     Score-weighted allocation for better risk-adjusted returns.
+    
+    Args:
+        num_stocks: Number of stocks in portfolio
+        strategy: Filter by strategy name (None = all strategies)
     """
-    buy_candidates = get_walk_forward_buy_opportunities(limit=50)
+    buy_candidates = get_walk_forward_buy_opportunities(limit=50, strategy=strategy)
     
     if buy_candidates.empty:
         return pd.DataFrame()
@@ -358,21 +386,22 @@ def format_strategy_summary(df: pd.DataFrame) -> str:
     
     return message
 
-def format_walk_forward_alert(df: pd.DataFrame, alert_type: str = "buy") -> str:
+def format_walk_forward_alert(df: pd.DataFrame, alert_type: str = "buy", strategy: str = None) -> str:
     """Format walk-forward buy opportunities as Telegram message."""
     
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    strategy_label = f" ({strategy})" if strategy else ""
     
     if alert_type == "buy":
-        message = f"🟢 *WALK\\-FORWARD BUY IDEAS* 🟢\n"
+        message = f"🟢 *WALK\\-FORWARD BUY IDEAS{escape_markdown(strategy_label)}* 🟢\n"
         message += f"_Anti\\-Overfitting Analysis_\n"
         message += f"_{timestamp}_\n\n"
     elif alert_type == "conservative":
-        message = f"🛡️ *CONSERVATIVE BUY IDEAS* 🛡️\n"
+        message = f"🛡️ *CONSERVATIVE BUY IDEAS{escape_markdown(strategy_label)}* 🛡️\n"
         message += f"_High Consistency Picks_\n"
         message += f"_{timestamp}_\n\n"
     else:  # aggressive
-        message = f"🚀 *AGGRESSIVE BUY IDEAS* 🚀\n"
+        message = f"🚀 *AGGRESSIVE BUY IDEAS{escape_markdown(strategy_label)}* 🚀\n"
         message += f"_High Return Potential_\n"
         message += f"_{timestamp}_\n\n"
     
@@ -387,7 +416,12 @@ def format_walk_forward_alert(df: pd.DataFrame, alert_type: str = "buy") -> str:
     for idx, row in df.iterrows():
         ticker = escape_markdown(str(row['ticker']))
         
-        message += f"*{ticker}*\n"
+        message += f"*{ticker}*"
+        if 'strategy' in row and pd.notna(row['strategy']) and not strategy:
+            strat = escape_markdown(str(row['strategy']))
+            message += f" \\| {strat}"
+        message += "\n"
+        
         message += f"  • Return: {row['total_return']*100:+.1f}% \\| Consistency: {row['consistency']*100:.0f}%\n"
         message += f"  • Sharpe: {row['avg_sharpe']:.2f} \\| Score: {row['composite_score']:.3f}\n"
         message += f"  • Windows: {row['num_windows']} \\| Wins: {row['winning_windows']}\n"
@@ -402,12 +436,13 @@ def format_walk_forward_alert(df: pd.DataFrame, alert_type: str = "buy") -> str:
     
     return message
 
-def format_portfolio_alert(df: pd.DataFrame) -> str:
+def format_portfolio_alert(df: pd.DataFrame, strategy: str = None) -> str:
     """Format portfolio allocation as Telegram message."""
     
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    strategy_label = f" ({strategy})" if strategy else ""
     
-    message = f"📊 *PORTFOLIO ALLOCATION* 📊\n"
+    message = f"📊 *PORTFOLIO ALLOCATION{escape_markdown(strategy_label)}* 📊\n"
     message += f"_Score\\-Weighted Portfolio_\n"
     message += f"_{timestamp}_\n\n"
     
@@ -519,42 +554,44 @@ def send_strategy_summary():
     message = format_strategy_summary(df)
     send_telegram_message(message)
 
-def send_walk_forward_ideas(limit=10, mode="buy"):
+def send_walk_forward_ideas(limit=10, mode="buy", strategy=None):
     """Send walk-forward buy opportunities to Telegram."""
-    print(f"🔍 Querying walk-forward {mode} opportunities...")
+    strategy_label = f" ({strategy})" if strategy else ""
+    print(f"🔍 Querying walk-forward {mode} opportunities{strategy_label}...")
     
     if mode == "conservative":
-        df = get_walk_forward_conservative(limit)
+        df = get_walk_forward_conservative(limit, strategy=strategy)
         alert_type = "conservative"
     elif mode == "aggressive":
-        df = get_walk_forward_aggressive(limit)
+        df = get_walk_forward_aggressive(limit, strategy=strategy)
         alert_type = "aggressive"
     else:  # buy
-        df = get_walk_forward_buy_opportunities(limit)
+        df = get_walk_forward_buy_opportunities(limit, strategy=strategy)
         alert_type = "buy"
     
     if df.empty:
-        print(f"No {mode} opportunities found in walk-forward results.")
+        print(f"No {mode} opportunities found in walk-forward results{strategy_label}.")
         return
     
     print(f"Found {len(df)} opportunities")
     
-    message = format_walk_forward_alert(df, alert_type=alert_type)
+    message = format_walk_forward_alert(df, alert_type=alert_type, strategy=strategy)
     send_telegram_message(message)
 
-def send_portfolio_allocation(num_stocks=10):
+def send_portfolio_allocation(num_stocks=10, strategy=None):
     """Send portfolio allocation to Telegram."""
-    print(f"🔍 Generating {num_stocks}-stock portfolio from walk-forward results...")
+    strategy_label = f" ({strategy})" if strategy else ""
+    print(f"🔍 Generating {num_stocks}-stock portfolio from walk-forward results{strategy_label}...")
     
-    df = get_walk_forward_portfolio(num_stocks)
+    df = get_walk_forward_portfolio(num_stocks, strategy=strategy)
     
     if df.empty:
-        print("No portfolio available. Run walk-forward analysis first.")
+        print(f"No portfolio available{strategy_label}. Run walk-forward analysis first.")
         return
     
     print(f"Portfolio generated with {len(df)} stocks")
     
-    message = format_portfolio_alert(df)
+    message = format_portfolio_alert(df, strategy=strategy)
     send_telegram_message(message)
 
 def send_comparison_alert(limit=5):
@@ -608,6 +645,7 @@ Examples:
     parser.add_argument("--wf-buy", action="store_true", help="Send walk-forward buy recommendations (anti-overfitting)")
     parser.add_argument("--wf-conservative", action="store_true", help="Send conservative walk-forward picks")
     parser.add_argument("--wf-aggressive", action="store_true", help="Send aggressive walk-forward picks")
+    parser.add_argument("--wf-strategy", type=str, help="Filter walk-forward by strategy (rsi_classic, macd_only, bollinger_bands, etc.)")
     parser.add_argument("--portfolio", type=int, help="Send portfolio allocation (specify number of stocks)")
     parser.add_argument("--compare", action="store_true", help="Compare walk-forward vs standard backtest")
     
@@ -624,13 +662,13 @@ Examples:
     
     # Walk-forward alerts (preferred)
     if args.wf_buy:
-        send_walk_forward_ideas(limit=args.limit, mode="buy")
+        send_walk_forward_ideas(limit=args.limit, mode="buy", strategy=args.wf_strategy)
     elif args.wf_conservative:
-        send_walk_forward_ideas(limit=args.limit, mode="conservative")
+        send_walk_forward_ideas(limit=args.limit, mode="conservative", strategy=args.wf_strategy)
     elif args.wf_aggressive:
-        send_walk_forward_ideas(limit=args.limit, mode="aggressive")
+        send_walk_forward_ideas(limit=args.limit, mode="aggressive", strategy=args.wf_strategy)
     elif args.portfolio:
-        send_portfolio_allocation(num_stocks=args.portfolio)
+        send_portfolio_allocation(num_stocks=args.portfolio, strategy=args.wf_strategy)
     elif args.compare:
         send_comparison_alert(limit=args.limit)
     
