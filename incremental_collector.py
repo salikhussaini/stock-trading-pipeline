@@ -269,6 +269,7 @@ def safe_yf_download_batch(tickers, start, end, retries=3):
             )
             
             if df is not None and not df.empty:
+                log_info(f"Batch download returned data: shape={df.shape}, columns={df.columns.tolist()[:5] if len(df.columns) > 5 else df.columns.tolist()}")
                 decrease_delay()
                 
                 # If only one ticker, df structure is different
@@ -279,10 +280,22 @@ def safe_yf_download_batch(tickers, start, end, retries=3):
                 result = {}
                 for ticker in tickers:
                     try:
-                        ticker_df = df[ticker] if len(tickers) > 1 else df
+                        # Multi-ticker downloads have multi-level columns
+                        # Try to extract ticker-specific data
+                        if ticker in df.columns.get_level_values(0):
+                            ticker_df = df[ticker]
+                        elif hasattr(df, 'columns') and ticker in df.columns:
+                            ticker_df = df[[ticker]]
+                        else:
+                            # Try direct indexing
+                            ticker_df = df[ticker]
+                        
                         if ticker_df is not None and not ticker_df.empty:
                             result[ticker] = ticker_df
-                    except (KeyError, IndexError):
+                        else:
+                            result[ticker] = None
+                    except (KeyError, IndexError, AttributeError) as e:
+                        log_warning(f"Could not extract {ticker} from batch: {e}")
                         result[ticker] = None
                 
                 return result
@@ -297,6 +310,7 @@ def safe_yf_download_batch(tickers, start, end, retries=3):
                 time.sleep(30 + random.uniform(0, 10))
                 continue
             
+            log_warning(f"Batch download attempt {retry + 1}/{retries} failed: {error_str[:100]}")
             time.sleep(base_delay * (2 ** retry) + random.uniform(0, 1))
     
     return {ticker: None for ticker in tickers}
@@ -705,7 +719,7 @@ log_pipeline_start(
 )
 
 # Batch tickers (5-10 per batch to balance efficiency and API limits)
-BATCH_SIZE = 100
+BATCH_SIZE = 20  
 ticker_batches = [tickers[i:i+BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
 
 log_info(f"Using batch mode: {len(ticker_batches)} batches of ~{BATCH_SIZE} tickers")
