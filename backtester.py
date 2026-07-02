@@ -838,7 +838,13 @@ def run_walk_forward_batch(
     if output_path.exists() and not force_rerun:
         try:
             existing_df = pd.read_csv(output_path)
+            # Clean whitespace from string columns
+            if 'strategy' in existing_df.columns:
+                existing_df['strategy'] = existing_df['strategy'].astype(str).str.strip()
+            if 'ticker' in existing_df.columns:
+                existing_df['ticker'] = existing_df['ticker'].astype(str).str.strip()
             log_info(f"Loaded cache file with {len(existing_df)} total results")
+            log_info(f"Strategies in cache: {existing_df['strategy'].unique().tolist()}")
             # Filter by matching strategy and parameters
             cached = existing_df[
                 (existing_df['strategy'] == strategy_name)
