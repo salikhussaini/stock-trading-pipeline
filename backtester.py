@@ -907,6 +907,14 @@ def run_walk_forward_batch(
             ticker_df['sma_10'] = ticker_df.get('st_sma_10', ticker_df['lt_sma_20'])
             ticker_df['sma_20'] = ticker_df['lt_sma_20']
             ticker_df['sma_50'] = ticker_df['lt_sma_50']
+        if 'lt_bb_position' in ticker_df.columns and 'bb_position' not in ticker_df.columns:
+            ticker_df['bb_position'] = ticker_df['lt_bb_position']
+        if 'st_ema_10' in ticker_df.columns and 'ema_10' not in ticker_df.columns:
+            ticker_df['ema_10'] = ticker_df['st_ema_10']
+        if 'lt_ema_20' in ticker_df.columns and 'ema_20' not in ticker_df.columns:
+            ticker_df['ema_20'] = ticker_df['lt_ema_20']
+        if 'lt_ema_50' in ticker_df.columns and 'ema_50' not in ticker_df.columns:
+            ticker_df['ema_50'] = ticker_df.get('lt_ema_50', ticker_df.get('lt_ema_20', 0))
         
         # Rename back for walk_forward_analysis
         if 'date' in ticker_df.columns:
