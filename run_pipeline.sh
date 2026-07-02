@@ -1,86 +1,228 @@
 #!/bin/bash
-# Set PATH for cron compatibility
-export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-# At the top, after PATH export:
-PYTHON="/home/piuser/.venv-stock/bin/python"
-
-if [ ! -x "$PYTHON" ]; then
-    echo "ERROR: Virtual environment not found at $PYTHON"
-    echo "Create it with: python3 -m venv /home/piuser/.venv-stock && pip install -r requirements.txt"
-    exit 1
-fi
-
-
-export SHELL=/bin/bash
-export LC_ALL=C.UTF-8
-export LANG=C.UTF-8
-set -euo pipefail  # e=exit on error, u=undefined vars, o pipefail=pipe errors
-LOCK_FILE="/tmp/stock_pipeline.lock"
-if [ -f "$LOCK_FILE" ]; then
-    echo "Pipeline already running"
-    exit 1
-fi
-trap "rm -f $LOCK_FILE" EXIT
-touch "$LOCK_FILE"
 # =========================================================
 # run_pipeline.sh
 # Run the complete stock trading pipeline sequentially
 # =========================================================
 
-set -e  # Exit on any error
+# Set PATH for cron compatibility
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export SHELL=/bin/bash
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
+set -euo pipefail  # e=exit on error, u=undefined vars, o pipefail=pipe errors
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
+PYTHON="/home/piuser/.venv-stock/bin/python"
+LOCK_FILE="/tmp/stock_pipeline.lock"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Colors for output
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Get the directory where this script is located
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Default options
+SKIP_DOWNLOAD=false
+SKIP_TELEGRAM=false
+TEST_MODE=false
+WORKERS=4
+
+# =========================================================
+# HELPER FUNCTIONS
+# =========================================================
+
+usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Run the complete stock trading pipeline sequentially.
+
+OPTIONS:
+    --skip-download     Skip data download step (use existing data)
+    --skip-telegram     Skip sending Telegram notifications
+    --test              Test mode (process only 10 tickers)
+    --workers N         Number of parallel workers (default: 4)
+    --help              Show this help message
+
+EXAMPLES:
+    $0                          # Full pipeline with defaults
+    $0 --test                   # Quick test with 10 tickers
+    $0 --skip-download          # Skip download, run features + backtest
+    $0 --workers 8              # Use 8 parallel workers
+
+EOF
+    exit 0
+}
+
+log_step() {
+    echo -e "${GREEN}$1${NC}"
+}
+
+log_info() {
+    echo -e "${BLUE}$1${NC}"
+}
+
+log_warn() {
+    echo -e "${YELLOW}$1${NC}"
+}
+
+log_error() {
+    echo -e "${RED}$1${NC}"
+}
+
+format_time() {
+    local seconds=$1
+    if [ $seconds -lt 60 ]; then
+        echo "${seconds}s"
+    else
+        echo "${seconds}s (~$((seconds / 60))m $((seconds % 60))s)"
+    fi
+}
+
+cleanup() {
+    rm -f "$LOCK_FILE"
+}
+
+# =========================================================
+# PARSE ARGUMENTS
+# =========================================================
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skip-download)
+            SKIP_DOWNLOAD=true
+            shift
+            ;;
+        --skip-telegram)
+            SKIP_TELEGRAM=true
+            shift
+            ;;
+        --test)
+            TEST_MODE=true
+            shift
+            ;;
+        --workers)
+            WORKERS="$2"
+            shift 2
+            ;;
+        --help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# =========================================================
+# PREFLIGHT CHECKS
+# =========================================================
+
+# Check if pipeline is already running
+if [ -f "$LOCK_FILE" ]; then
+    log_error "ERROR: Pipeline already running (lock file exists: $LOCK_FILE)"
+    log_info "If this is incorrect, remove the lock file: rm $LOCK_FILE"
+    exit 1
+fi
+
+# Set trap to cleanup on exit
+trap cleanup EXIT INT TERM
+
+# Create lock file
+touch "$LOCK_FILE"
+
+# Change to script directory
 cd "$SCRIPT_DIR"
 
+# Check Python virtual environment
+if [ ! -x "$PYTHON" ]; then
+    log_error "ERROR: Virtual environment not found at $PYTHON"
+    log_info "Create it with:"
+    log_info "  python3 -m venv /home/piuser/.venv-stock"
+    log_info "  source /home/piuser/.venv-stock/bin/activate"
+    log_info "  pip install -r requirements.txt"
+    exit 1
+fi
+
+# Check required files
+if [ ! -f "tickers.csv" ]; then
+    log_error "ERROR: tickers.csv not found"
+    exit 1
+fi
+
+# Create necessary directories
+mkdir -p database logs
+
+# =========================================================
+# START PIPELINE
+# =========================================================
 
 echo ""
+log_info "========================================"
+log_info "     Stock Trading Pipeline"
+log_info "========================================"
+echo ""
 
-# Timing
+if [ "$TEST_MODE" = true ]; then
+    log_warn "🧪 TEST MODE: Processing only 10 tickers"
+    echo ""
+fi
+
 START_TIME=$(date +%s)
-
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}Stock Trading Pipeline${NC}"
-echo -e "${BLUE}========================================${NC}"
-echo ""
 
 # =========================================================
 # STEP 1: Download Stock Data
 # =========================================================
 
-echo -e "${GREEN}[1/3] Downloading stock data...${NC}"
-echo ""
+STEP1_START=$(date +%s)
 
-if $PYTHON incremental_collector.py; then
-    echo -e "${GREEN}✓ Data download complete${NC}"
-    DOWNLOAD_TIME=$(($(date +%s) - START_TIME))
-    echo -e "Time: ${DOWNLOAD_TIME}s"
+if [ "$SKIP_DOWNLOAD" = true ]; then
+    log_warn "[1/4] Skipping data download (--skip-download)"
     echo ""
+    DOWNLOAD_TIME=0
 else
-    echo -e "${RED}✗ Data download failed${NC}"
-    exit 1
+    log_step "[1/4] Downloading stock data..."
+    echo ""
+    
+    CMD="$PYTHON incremental_collector.py --workers $WORKERS"
+    if [ "$TEST_MODE" = true ]; then
+        CMD="$CMD --test"
+    fi
+    
+    if $CMD; then
+        DOWNLOAD_TIME=$(($(date +%s) - STEP1_START))
+        log_step "✓ Data download complete"
+        log_info "Time: $(format_time $DOWNLOAD_TIME)"
+        echo ""
+    else
+        log_error "✗ Data download failed"
+        exit 1
+    fi
 fi
 
 # =========================================================
 # STEP 2: Generate Features
 # =========================================================
 
-echo -e "${GREEN}[2/3] Generating features...${NC}"
+STEP2_START=$(date +%s)
+
+log_step "[2/4] Generating features..."
 echo ""
 
 if $PYTHON feature_engine.py; then
-    echo -e "${GREEN}✓ Feature generation complete${NC}"
-    FEATURE_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME))
-    echo -e "Time: ${FEATURE_TIME}s"
+    FEATURE_TIME=$(($(date +%s) - STEP2_START))
+    log_step "✓ Feature generation complete"
+    log_info "Time: $(format_time $FEATURE_TIME)"
     echo ""
 else
-    echo -e "${RED}✗ Feature generation failed${NC}"
+    log_error "✗ Feature generation failed"
     exit 1
 fi
 
@@ -88,29 +230,45 @@ fi
 # STEP 3: Backtest Strategies
 # =========================================================
 
-echo -e "${GREEN}[3/3] Backtesting strategies...${NC}"
+STEP3_START=$(date +%s)
+
+log_step "[3/4] Backtesting strategies..."
 echo ""
 
 if $PYTHON backtester.py; then
-    echo -e "${GREEN}✓ Backtesting complete${NC}"
-    BACKTEST_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME - FEATURE_TIME))
-    echo -e "Time: ${BACKTEST_TIME}s"
+    BACKTEST_TIME=$(($(date +%s) - STEP3_START))
+    log_step "✓ Backtesting complete"
+    log_info "Time: $(format_time $BACKTEST_TIME)"
     echo ""
 else
-    echo -e "${RED}✗ Backtesting failed${NC}"
+    log_error "✗ Backtesting failed"
     exit 1
 fi
 
-echo -e "${GREEN}[4/4] Sending Telegram notification...${NC}"
-echo ""
-if $PYTHON telegram_sender.py; then
-    echo -e "${GREEN}✓ Telegram notification sent${NC}"
-    TELEGRAM_TIME=$(($(date +%s) - START_TIME - DOWNLOAD_TIME - FEATURE_TIME - BACKTEST_TIME))
-    echo -e "Time: ${TELEGRAM_TIME}s"
+# =========================================================
+# STEP 4: Send Telegram Notification
+# =========================================================
+
+STEP4_START=$(date +%s)
+
+if [ "$SKIP_TELEGRAM" = true ]; then
+    log_warn "[4/4] Skipping Telegram notification (--skip-telegram)"
     echo ""
+    TELEGRAM_TIME=0
 else
-    echo -e "${RED}✗ Telegram notification failed${NC}"
-    exit 1
+    log_step "[4/4] Sending Telegram notification..."
+    echo ""
+    
+    if $PYTHON telegram_sender.py; then
+        TELEGRAM_TIME=$(($(date +%s) - STEP4_START))
+        log_step "✓ Telegram notification sent"
+        log_info "Time: $(format_time $TELEGRAM_TIME)"
+        echo ""
+    else
+        log_warn "⚠ Telegram notification failed (non-fatal)"
+        TELEGRAM_TIME=$(($(date +%s) - STEP4_START))
+        echo ""
+    fi
 fi
 
 # =========================================================
@@ -119,22 +277,22 @@ fi
 
 TOTAL_TIME=$(($(date +%s) - START_TIME))
 
-echo -e "${BLUE}========================================${NC}"
-echo -e "${GREEN}Pipeline Complete!${NC}"
-echo -e "${BLUE}========================================${NC}"
+log_info "========================================"
+log_step "     Pipeline Complete! ✓"
+log_info "========================================"
 echo ""
 echo "Stage Breakdown:"
-echo "  Data download  : ${DOWNLOAD_TIME}s"
-echo "  Features       : ${FEATURE_TIME}s"
-echo "  Backtesting    : ${BACKTEST_TIME}s"
-echo "  Telegram       : ${TELEGRAM_TIME}s"
-echo "  ─────────────────────"
-echo "  Total time     : ${TOTAL_TIME}s (~$((TOTAL_TIME / 60))m)"
+printf "  %-20s : %s\n" "Data download" "$(format_time $DOWNLOAD_TIME)"
+printf "  %-20s : %s\n" "Features" "$(format_time $FEATURE_TIME)"
+printf "  %-20s : %s\n" "Backtesting" "$(format_time $BACKTEST_TIME)"
+printf "  %-20s : %s\n" "Telegram" "$(format_time $TELEGRAM_TIME)"
+echo "  ────────────────────────────────"
+printf "  %-20s : %s\n" "Total time" "$(format_time $TOTAL_TIME)"
 echo ""
 echo "Results available in:"
-echo "  - database/stock_data.duckdb (data & backtest results)"
-echo "  - database/stock_features.parquet (features)"
-echo "  - logs/pipeline.log (execution log)"
+echo "  📊 database/stock_data.duckdb (data & backtest results)"
+echo "  📈 database/stock_features.parquet (features)"
+echo "  📝 logs/pipeline.log (execution log)"
 echo ""
-echo -e "${GREEN}✓ Ready for analysis!${NC}"
+log_step "✓ Ready for analysis!"
 echo ""

@@ -8,11 +8,7 @@ from datetime import datetime, timedelta, date
 import uuid
 import time
 import random
-import queue
 import threading
-import sys
-from io import StringIO
-import contextlib
 
 import duckdb
 import pandas as pd
@@ -57,7 +53,7 @@ pipeline_name = "incremental_collector_hardened"
 parser = argparse.ArgumentParser(description="Incremental stock data collector")
 parser.add_argument("--test", action="store_true", help="Run a quick test using a small subset of tickers")
 parser.add_argument("--limit", type=int, default=0, help="Limit number of tickers (0 = all)")
-parser.add_argument("--workers", type=int, default=8, help="Number of worker threads")
+parser.add_argument("--workers", type=int, default=4, help="Number of worker threads")
 args = parser.parse_args()
 
 
@@ -139,6 +135,9 @@ CREATE TABLE IF NOT EXISTS ticker_state (
 )
 """)
 
+# Close main connection before threading to avoid conflicts
+main_conn.close()
+
 # =========================================================
 # LOAD S&P 500 (CLEANED)
 # =========================================================
@@ -216,17 +215,18 @@ def safe_yf_download(ticker, start, end, retries=3):
                 start_str = start_date.strftime("%Y-%m-%d")
                 current_end_str = current_end.strftime("%Y-%m-%d")
                 
-                # Suppress yfinance stdout/stderr
-                with contextlib.redirect_stdout(StringIO()), contextlib.redirect_stderr(StringIO()):
-                    df = yf.download(
-                        ticker,
-                        start=start_str,
-                        end=current_end_str,
-                        interval="1d",
-                        auto_adjust=False,
-                        progress=False,
-                        threads=False
-                    )
+                # Safer approach: don't suppress output in threaded environment
+                # Just set auto_adjust and progress flags appropriately
+                df = yf.download(
+                    ticker,
+                    start=start_str,
+                    end=current_end_str,
+                    interval="1d",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    show_errors=False  # Suppress yfinance error messages
+                )
 
                 if df is not None and not df.empty:
                     return df
@@ -254,12 +254,21 @@ def process_ticker(ticker):
     rows = 0
     start_date = None
     end_date = None
+    conn = None
 
     try:
         # -------------------------
         # LOCAL DB CONNECTION (THREAD SAFE)
         # -------------------------
-        conn = duckdb.connect(str(DB_PATH))
+        # Add retry logic for database connections
+        for attempt in range(3):
+            try:
+                conn = duckdb.connect(str(DB_PATH))
+                break
+            except Exception as conn_err:
+                if attempt == 2:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
 
         # -------------------------
         # STATE LOOKUP
@@ -282,7 +291,8 @@ def process_ticker(ticker):
         end_date = get_last_trading_day()
 
         if start_date >= end_date:
-            conn.close()
+            if conn:
+                conn.close()
             status = "SKIPPED"
             error = f"Up to date (last: {start_date - timedelta(days=1)}, latest trading day: {end_date})"
             return  # Exit early - no download needed
@@ -308,7 +318,8 @@ def process_ticker(ticker):
             
             last_db_date_val = last_db_date[0] if last_db_date and last_db_date[0] else None
             
-            conn.close()
+            if conn:
+                conn.close()
             status = "SKIPPED"
             
             if last_db_date_val:
@@ -377,7 +388,8 @@ def process_ticker(ticker):
             WHEN NOT MATCHED THEN INSERT (ticker, last_date) VALUES (s.ticker, s.last_date)
         """, [ticker, last_date_val])
 
-        conn.close()
+        if conn:
+            conn.close()
 
         with metrics_lock:
             success += 1
@@ -394,6 +406,13 @@ def process_ticker(ticker):
 
         increase_delay()
         log_error(f"{ticker} failed: {str(e)}")
+        
+        # Ensure connection is closed even on error
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
     elapsed = round(time.perf_counter() - start_time, 2)
     
@@ -436,7 +455,10 @@ total_time = round(time.perf_counter() - overall_start, 2)
 start_time = datetime.fromtimestamp(overall_start)
 end_time = datetime.now()
 
-main_conn.execute("""
+# Reconnect to database for final summary write
+final_conn = duckdb.connect(str(DB_PATH))
+
+final_conn.execute("""
 INSERT INTO pipeline_runs VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
@@ -453,7 +475,7 @@ INSERT INTO pipeline_runs VALUES (
     "SUCCESS" if failed == 0 else "PARTIAL"
 ])
 
-main_conn.close()
+final_conn.close()
 
 # =========================================================
 # FINAL OUTPUT
