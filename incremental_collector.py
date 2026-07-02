@@ -254,6 +254,10 @@ def safe_yf_download_batch(tickers, start, end, retries=3):
     
     for retry in range(retries):
         try:
+            # Get a local copy of session to avoid threading issues
+            with session_lock:
+                local_session = yf_session
+            
             # Download multiple tickers at once
             df = yf.download(
                 tickers,  # List of tickers
@@ -263,7 +267,6 @@ def safe_yf_download_batch(tickers, start, end, retries=3):
                 auto_adjust=False,
                 progress=False,
                 threads=False,
-                session=yf_session,
                 group_by='ticker'  # Group by ticker for multi-ticker downloads
             )
             
@@ -368,8 +371,7 @@ def safe_yf_download(ticker, start, end, retries=3):
                     interval="1d",
                     auto_adjust=False,
                     progress=False,
-                    threads=False,
-                    session=yf_session  # Use cached session
+                    threads=False
                 )
 
                 if df is not None and not df.empty:
@@ -593,6 +595,22 @@ def process_ticker_batch(ticker_batch):
     """
     Process multiple tickers in one API call (more efficient).
     """
+    # Add crash protection
+    try:
+        return _process_ticker_batch_impl(ticker_batch)
+    except Exception as e:
+        log_error(f"Batch processing crashed: {e}, falling back to individual downloads")
+        # Fall back to processing individually
+        for ticker in ticker_batch:
+            try:
+                process_ticker(ticker)
+            except Exception as e2:
+                log_error(f"Individual fallback also failed for {ticker}: {e2}")
+
+def _process_ticker_batch_impl(ticker_batch):
+    """
+    Implementation of batch processing (wrapped for safety).
+    """
     # Get date ranges for each ticker
     conn = duckdb.connect(str(DB_PATH))
     
@@ -717,12 +735,16 @@ log_pipeline_start(
 )
 
 # Batch tickers (5-10 per batch to balance efficiency and API limits)
-BATCH_SIZE = 20  
+BATCH_SIZE = 5  # Reduced to avoid segfaults with large batches
 ticker_batches = [tickers[i:i+BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
 
 log_info(f"Using batch mode: {len(ticker_batches)} batches of ~{BATCH_SIZE} tickers")
 
-with ThreadPoolExecutor(max_workers=args.workers) as executor:
+# Use workers=1 to avoid threading issues that cause segfaults
+actual_workers = 1  # Force single-threaded to prevent crashes
+log_info(f"Using {actual_workers} worker (forced single-threaded for stability)")
+
+with ThreadPoolExecutor(max_workers=actual_workers) as executor:
     futures = [executor.submit(process_ticker_batch, batch) for batch in ticker_batches]
     for fut in as_completed(futures):
         try:
