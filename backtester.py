@@ -1555,21 +1555,26 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # STANDARD BACKTEST (all strategies)
-  # Test all 28 strategies on 10 tickers (8 workers)
+  # DEFAULT: Run BOTH standard + walk-forward
   python backtester.py --limit 10
   
-  # Test specific strategies
-  python backtester.py --strategies rsi_classic macd_only all_oscillators --limit 5
+  # Run ONLY standard backtest (28 strategies)
+  python backtester.py --standard --limit 10
   
-  # Test all strategies on all available tickers
+  # Run ONLY walk-forward analysis
+  python backtester.py --walk-forward --limit 10
+  
+  # Test specific strategies (standard mode)
+  python backtester.py --standard --strategies rsi_classic macd_only --limit 5
+  
+  # Test all strategies on all available tickers (both modes)
   python backtester.py
   
   # Force re-run without using cache
   python backtester.py --limit 20 --force-rerun
   
-  # Use more workers for faster execution
-  python backtester.py --limit 50 --workers 16
+  # Use more workers for faster execution (standard mode)
+  python backtester.py --standard --limit 50 --workers 16
   
   # Test on specific tickers
   python backtester.py --tickers AAPL MSFT GOOGL NVDA
@@ -1583,13 +1588,22 @@ Examples:
   
   # Custom walk-forward windows (6 months train, 1 month test)
   python backtester.py --walk-forward --limit 10 --train-days 126 --test-days 21
+  
+  # Choose walk-forward strategy
+  python backtester.py --walk-forward --wf-strategy macd_only --limit 20
         """
     )
     
     parser.add_argument(
         '--walk-forward',
         action='store_true',
-        help='Run walk-forward analysis (anti-overfitting) instead of standard backtest'
+        help='Run walk-forward analysis only (default: runs both standard + walk-forward)'
+    )
+    
+    parser.add_argument(
+        '--standard',
+        action='store_true',
+        help='Run standard backtest only (default: runs both standard + walk-forward)'
     )
     
     parser.add_argument(
@@ -1657,11 +1671,23 @@ Examples:
     
     args = parser.parse_args()
     
+    # Determine which modes to run
+    run_standard = args.standard or (not args.walk_forward and not args.standard)
+    run_walk_forward = args.walk_forward or (not args.walk_forward and not args.standard)
+    
+    # Log which modes will run
+    if run_standard and run_walk_forward:
+        log_info("Running BOTH standard backtest + walk-forward analysis")
+    elif run_standard:
+        log_info("Running STANDARD BACKTEST only")
+    elif run_walk_forward:
+        log_info("Running WALK-FORWARD ANALYSIS only")
+    
     # =========================================================
     # WALK-FORWARD ANALYSIS MODE
     # =========================================================
-    if args.walk_forward:
-        log_info(f"Running WALK-FORWARD ANALYSIS mode (anti-overfitting) with {args.wf_strategy}")
+    if run_walk_forward:
+        log_info(f"Walk-forward strategy: {args.wf_strategy}")
         
         results = run_walk_forward_batch(
             tickers=args.tickers,
@@ -1689,13 +1715,14 @@ Examples:
             
             results.to_csv(output_path, index=False)
             log_info(f"\nResults saved to: {output_path}")
+        
+        if run_standard:
+            log_info("\n" + "="*70)  # Separator between modes
     
     # =========================================================
     # STANDARD BACKTEST MODE
     # =========================================================
-    else:
-        log_info("Running STANDARD BACKTEST mode")
-        
+    if run_standard:
         # Validate strategy names
         if args.strategies:
             invalid = [s for s in args.strategies if s not in STRATEGIES]

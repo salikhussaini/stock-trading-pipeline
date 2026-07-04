@@ -55,10 +55,10 @@ OPTIONS:
     --batch-size N      Tickers per batch download request (default: 100, 0 = disabled)
     
     BACKTEST OPTIONS:
-    --walk-forward      Run walk-forward analysis (anti-overfitting, recommended)
-    --standard          Run standard backtest only (default)
-    --both              Run both standard and walk-forward
-    --wf-limit N        Number of tickers for walk-forward (default: 50)
+    --walk-forward      Run walk-forward analysis only (anti-overfitting)
+    --standard          Run standard backtest only (28 strategies)
+    --both              Run both standard and walk-forward (default: all tickers)
+    --wf-limit N        Number of tickers for walk-forward (default: 50, only for --walk-forward)
     
     TELEGRAM OPTIONS:
     --telegram-wf       Send walk-forward alerts (default when --walk-forward used)
@@ -68,9 +68,9 @@ OPTIONS:
     --help              Show this help message
 
 EXAMPLES:
-    $0                              # Full pipeline with standard backtest
+    $0                              # Full pipeline: both modes, all tickers
     $0 --walk-forward               # Walk-forward analysis (anti-overfitting)
-    $0 --both                       # Run both standard + walk-forward
+    $0 --both                       # Run both standard + walk-forward (all tickers)
     $0 --walk-forward --wf-limit 100  # Walk-forward on 100 tickers
     $0 --test                       # Quick test with 10 tickers
     $0 --skip-download              # Skip download, run features + backtest
@@ -244,7 +244,7 @@ case $BACKTEST_MODE in
         ;;
     both)
         log_info "📊 MODE: Standard + Walk-Forward (Comprehensive)"
-        log_info "    Walk-forward on $WALK_FORWARD_LIMIT tickers"
+        log_info "    Analyzing all tickers"
         ;;
 esac
 
@@ -312,21 +312,31 @@ echo ""
 
 BACKTEST_SUCCESS=true
 
-# Run standard backtest
-if [ "$BACKTEST_MODE" = "standard" ] || [ "$BACKTEST_MODE" = "both" ]; then
-    log_info "Running standard backtest (28 strategies)..."
+# Run based on mode
+if [ "$BACKTEST_MODE" = "both" ]; then
+    log_info "Running both standard backtest + walk-forward analysis..."
+    log_info "Walk-forward on all tickers..."
     
     if $PYTHON backtester.py; then
+        log_step "✓ Both modes complete"
+    else
+        log_error "✗ Backtesting failed"
+        BACKTEST_SUCCESS=false
+    fi
+    echo ""
+    
+elif [ "$BACKTEST_MODE" = "standard" ]; then
+    log_info "Running standard backtest (28 strategies)..."
+    
+    if $PYTHON backtester.py --standard; then
         log_step "✓ Standard backtest complete"
     else
         log_error "✗ Standard backtest failed"
         BACKTEST_SUCCESS=false
     fi
     echo ""
-fi
-
-# Run walk-forward analysis
-if [ "$BACKTEST_MODE" = "walk-forward" ] || [ "$BACKTEST_MODE" = "both" ]; then
+    
+elif [ "$BACKTEST_MODE" = "walk-forward" ]; then
     log_info "Running walk-forward analysis (anti-overfitting)..."
     log_info "Analyzing $WALK_FORWARD_LIMIT tickers..."
     
@@ -419,7 +429,7 @@ log_info "========================================"
 echo ""
 echo "Configuration:"
 printf "  %-20s : %s\n" "Backtest mode" "$BACKTEST_MODE"
-if [ "$BACKTEST_MODE" = "walk-forward" ] || [ "$BACKTEST_MODE" = "both" ]; then
+if [ "$BACKTEST_MODE" = "walk-forward" ]; then
     printf "  %-20s : %s tickers\n" "Walk-forward limit" "$WALK_FORWARD_LIMIT"
 fi
 printf "  %-20s : %s\n" "Telegram mode" "$TELEGRAM_MODE"
