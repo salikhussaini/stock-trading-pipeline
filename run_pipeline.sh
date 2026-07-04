@@ -16,7 +16,7 @@ set -euo pipefail  # e=exit on error, u=undefined vars, o pipefail=pipe errors
 # CONFIGURATION
 # =========================================================
 
-PYTHON="/home/piuser/.venv-stock/bin/python"
+PYTHON="/mnt/external/stock-trading-pipeline/.venv-stock/bin/python"
 LOCK_FILE="/tmp/stock_pipeline.lock"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
