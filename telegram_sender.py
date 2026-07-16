@@ -427,10 +427,11 @@ def get_strategy_summary():
 def get_daily_signals(signal_type="buy", limit=10):
     """
     Get today's trading signals from signal_engine.
+    Returns ONE signal per ticker (the strongest one) to ensure diversity.
     
     Args:
         signal_type: "buy" (final_signal==1), "sell" (final_signal==-1), or "all"
-        limit: Number of signals to return
+        limit: Number of signals to return (will return up to limit unique tickers)
     """
     if not SIGNALS_PATH.exists():
         print(f"⚠️  Trading signals not found. Run: python signal_engine.py")
@@ -450,6 +451,11 @@ def get_daily_signals(signal_type="buy", limit=10):
         df = df[df['final_signal'] == 1]
     elif signal_type == "sell":
         df = df[df['final_signal'] == -1]
+    
+    # IMPORTANT: Get best signal per ticker (group by ticker, keep highest signal_score)
+    # This ensures we get ONE signal per ticker, not multiple records for the same ticker
+    df = df.sort_values(['signal_score', 'signal_date'], ascending=[False, False])
+    df = df.drop_duplicates(subset=['ticker'], keep='first')
     
     # Sort by signal consensus (higher = stronger)
     df = df.sort_values('signal_score', ascending=False)
