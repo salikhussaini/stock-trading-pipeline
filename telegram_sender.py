@@ -21,6 +21,7 @@ load_dotenv()
 
 DB_PATH = Path(__file__).parent / "database" / "stock_data.duckdb"
 WALK_FORWARD_CSV = Path(__file__).parent / "walk_forward_results.csv"
+SIGNALS_PATH = Path(__file__).parent / "database" / "trading_signals.parquet"
 
 # Load from .env file
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -136,6 +137,118 @@ def get_strategy_summary():
     df = conn.execute(query).df()
     conn.close()
     return df
+
+# =========================================================
+# DAILY SIGNAL QUERY FUNCTIONS
+# =========================================================
+
+def get_daily_signals(signal_type="buy", limit=10):
+    """
+    Get today's trading signals from signal_engine.
+    
+    Args:
+        signal_type: "buy" (final_signal==1), "sell" (final_signal==-1), or "all"
+        limit: Number of signals to return
+    """
+    if not SIGNALS_PATH.exists():
+        print(f"⚠️  Trading signals not found. Run: python signal_engine.py")
+        return pd.DataFrame()
+    
+    df = pd.read_parquet(SIGNALS_PATH)
+    
+    if df.empty:
+        return df
+    
+    # Get latest date
+    latest_date = df['signal_date'].max()
+    df = df[df['signal_date'] == latest_date].copy()
+    
+    # Filter by signal type
+    if signal_type == "buy":
+        df = df[df['final_signal'] == 1]
+    elif signal_type == "sell":
+        df = df[df['final_signal'] == -1]
+    
+    # Sort by signal consensus (higher = stronger)
+    df = df.sort_values('signal_score', ascending=False)
+    
+    return df.head(limit)
+
+def get_signals_with_backtest_validation(signal_type="buy", limit=10):
+    """
+    Get today's signals combined with backtest validation.
+    Only returns signals for stocks with positive backtest performance.
+    
+    Args:
+        signal_type: "buy" or "sell"
+        limit: Number of results to return
+    """
+    signals_df = get_daily_signals(signal_type=signal_type, limit=50)
+    
+    if signals_df.empty:
+        return pd.DataFrame()
+    
+    conn = duckdb.connect(str(DB_PATH), read_only=True)
+    
+    # Get best strategy for each ticker from backtest
+    backtest_query = """
+    WITH best_strategy AS (
+        SELECT 
+            ticker,
+            strategy_name,
+            total_return,
+            sharpe_ratio,
+            win_rate,
+            num_trades,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY sharpe_ratio DESC) as rn
+        FROM backtest_results
+        WHERE total_return > 0
+        AND sharpe_ratio > 0.5
+    )
+    SELECT 
+        ticker,
+        strategy_name as best_strategy,
+        ROUND(total_return, 2) as backtest_return,
+        ROUND(sharpe_ratio, 2) as backtest_sharpe
+    FROM best_strategy
+    WHERE rn = 1
+    """
+    
+    backtest_df = conn.execute(backtest_query).df()
+    conn.close()
+    
+    # Merge signals with backtest validation
+    result = signals_df.merge(
+        backtest_df,
+        on='ticker',
+        how='inner'  # Only keep signals with positive backtest
+    )
+    
+    return result.head(limit)
+
+def get_signal_summary():
+    """
+    Get today's signal summary (counts and distribution).
+    """
+    signals_df = get_daily_signals(limit=500)
+    
+    if signals_df.empty:
+        return {}
+    
+    buy_count = len(signals_df[signals_df['final_signal'] == 1])
+    sell_count = len(signals_df[signals_df['final_signal'] == -1])
+    neutral_count = len(signals_df[signals_df['final_signal'] == 0])
+    
+    # Strategy breakdown
+    strategy_signals = signals_df[['trend_following', 'momentum', 'mean_reversion', 'breakout']].sum()
+    
+    return {
+        'buy': buy_count,
+        'sell': sell_count,
+        'neutral': neutral_count,
+        'total': len(signals_df),
+        'strategies': strategy_signals.to_dict()
+    }
 
 # =========================================================
 # WALK-FORWARD QUERY FUNCTIONS (Anti-Overfitting)
@@ -386,6 +499,80 @@ def format_strategy_summary(df: pd.DataFrame) -> str:
     
     return message
 
+def format_daily_signals_alert(df: pd.DataFrame) -> str:
+    """Format today's trading signals as Telegram message."""
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    message = f"📊 *TODAY'S TRADING SIGNALS* 📊\n"
+    message += f"_{timestamp}_\n\n"
+    
+    if df.empty:
+        message += "No signals generated yet\\. Run: `python signal_engine.py`\n"
+        return message
+    
+    message += f"*{len(df)} signals with backtest validation:*\n\n"
+    
+    for idx, row in df.iterrows():
+        ticker = escape_markdown(str(row['ticker']))
+        best_strat = escape_markdown(str(row.get('best_strategy', 'N/A')))
+        signal_type = "🟢 BUY" if row['final_signal'] == 1 else "🔴 SELL"
+        
+        message += f"{signal_type} *{ticker}*\n"
+        message += f"  Signal Score: {row['signal_score']}/4 \\| Consensus: {row['signal_score']*25}%\n"
+        message += f"  Best Strategy: {best_strat}\n"
+        
+        if 'backtest_return' in row:
+            message += f"  Backtest Return: {row['backtest_return']}% \\| Sharpe: {row['backtest_sharpe']}\n"
+        
+        # Individual strategy signals
+        strategies = []
+        if row.get('trend_following') == 1:
+            strategies.append("Trend")
+        if row.get('momentum') == 1:
+            strategies.append("Momentum")
+        if row.get('mean_reversion') == 1:
+            strategies.append("MeanRev")
+        if row.get('breakout') == 1:
+            strategies.append("Breakout")
+        
+        if strategies:
+            message += f"  Strategies: {', '.join(strategies)}\n"
+        
+        message += "\n"
+    
+    message += "⚠️ _Real\\-time signals combined with backtest validation\\._"
+    
+    return message
+
+def format_signal_summary_alert(summary: dict) -> str:
+    """Format trading signal summary as Telegram message."""
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    message = f"📈 *SIGNAL SUMMARY* 📈\n"
+    message += f"_{timestamp}_\n\n"
+    
+    if not summary:
+        message += "No signals available\\. Run: `python signal_engine.py`\n"
+        return message
+    
+    message += f"*Today's Signal Breakdown:*\n"
+    message += f"  🟢 Buy Signals: {summary.get('buy', 0)}\n"
+    message += f"  🔴 Sell Signals: {summary.get('sell', 0)}\n"
+    message += f"  ⚪ Neutral: {summary.get('neutral', 0)}\n"
+    message += f"  Total Analyzed: {summary.get('total', 0)}\n\n"
+    
+    message += f"*Strategy Votes (Total Signals):*\n"
+    strategies = summary.get('strategies', {})
+    if strategies:
+        for strat, count in strategies.items():
+            message += f"  • {strat}: {int(count)} signals\n"
+    
+    message += "\n⚠️ _Ensemble voting system: stronger signals require more strategy agreement\\._"
+    
+    return message
+
 def format_walk_forward_alert(df: pd.DataFrame, alert_type: str = "buy", strategy: str = None) -> str:
     """Format walk-forward buy opportunities as Telegram message."""
     
@@ -604,6 +791,35 @@ def send_comparison_alert(limit=5):
     message = format_comparison_alert(wf_df, std_df)
     send_telegram_message(message)
 
+def send_daily_signals(signal_type="buy", limit=10):
+    """Send today's trading signals to Telegram."""
+    signal_label = "buy" if signal_type == "buy" else "sell"
+    print(f"🔍 Querying today's {signal_label} signals with backtest validation...")
+    
+    df = get_signals_with_backtest_validation(signal_type=signal_type, limit=limit)
+    
+    if df.empty:
+        print(f"No {signal_label} signals found.")
+        return
+    
+    print(f"Found {len(df)} signals")
+    
+    message = format_daily_signals_alert(df)
+    send_telegram_message(message)
+
+def send_signal_summary():
+    """Send today's signal summary to Telegram."""
+    print("🔍 Generating signal summary...")
+    
+    summary = get_signal_summary()
+    
+    if not summary:
+        print("No signals available.")
+        return
+    
+    message = format_signal_summary_alert(summary)
+    send_telegram_message(message)
+
 if __name__ == "__main__":
     import argparse
     
@@ -612,7 +828,17 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # WALK-FORWARD ALERTS (Recommended - More Reliable)
+  # DAILY SIGNALS (Real-Time - RECOMMENDED)
+  # Today's buy signals with backtest validation
+  python telegram_sender.py --signals-buy
+  
+  # Today's sell signals
+  python telegram_sender.py --signals-sell
+  
+  # Today's signal breakdown summary
+  python telegram_sender.py --signal-summary
+  
+  # WALK-FORWARD ALERTS (More Reliable)
   # Send walk-forward buy recommendations (anti-overfitting)
   python telegram_sender.py --wf-buy
   
@@ -636,7 +862,7 @@ Examples:
   # Strategy summary
   python telegram_sender.py --summary
   
-  # Send all alerts (standard + walk-forward)
+  # Send all alerts
   python telegram_sender.py --all
         """
     )
@@ -649,19 +875,32 @@ Examples:
     parser.add_argument("--portfolio", type=int, help="Send portfolio allocation (specify number of stocks)")
     parser.add_argument("--compare", action="store_true", help="Compare walk-forward vs standard backtest")
     
+    # Daily signal options (REAL-TIME - new)
+    parser.add_argument("--signals-buy", action="store_true", help="Send today's buy signals with backtest validation (REAL-TIME)")
+    parser.add_argument("--signals-sell", action="store_true", help="Send today's sell signals with backtest validation (REAL-TIME)")
+    parser.add_argument("--signal-summary", action="store_true", help="Send today's signal breakdown summary")
+    
     # Standard backtest options
     parser.add_argument("--buy", action="store_true", help="Send standard buy opportunities")
     parser.add_argument("--sell", action="store_true", help="Send standard sell opportunities")
     parser.add_argument("--summary", action="store_true", help="Send strategy summary")
     
     # General options
-    parser.add_argument("--all", action="store_true", help="Send all alerts (walk-forward + standard)")
+    parser.add_argument("--all", action="store_true", help="Send all alerts (signals + walk-forward + standard)")
     parser.add_argument("--limit", type=int, default=5, help="Number of results to send (default: 5)")
     
     args = parser.parse_args()
     
-    # Walk-forward alerts (preferred)
-    if args.wf_buy:
+    # Daily signal alerts (REAL-TIME - most timely)
+    if args.signals_buy:
+        send_daily_signals(signal_type="buy", limit=args.limit)
+    elif args.signals_sell:
+        send_daily_signals(signal_type="sell", limit=args.limit)
+    elif args.signal_summary:
+        send_signal_summary()
+    
+    # Walk-forward alerts (robust)
+    elif args.wf_buy:
         send_walk_forward_ideas(limit=args.limit, mode="buy", strategy=args.wf_strategy)
     elif args.wf_conservative:
         send_walk_forward_ideas(limit=args.limit, mode="conservative", strategy=args.wf_strategy)
@@ -672,7 +911,7 @@ Examples:
     elif args.compare:
         send_comparison_alert(limit=args.limit)
     
-    # Standard backtest alerts
+    # Standard backtest alerts (legacy)
     elif args.buy:
         send_buy_ideas(args.limit)
     elif args.sell:
@@ -683,15 +922,15 @@ Examples:
     # Send all alerts
     elif args.all:
         print("📤 Sending comprehensive alert package...\n")
+        send_daily_signals(signal_type="buy", limit=10)
+        print()
+        send_signal_summary()
+        print()
         send_walk_forward_ideas(limit=10, mode="buy")
         print()
         send_portfolio_allocation(num_stocks=10)
-        print()
-        send_comparison_alert(limit=5)
-        print()
-        send_strategy_summary()
     
-    # Default: walk-forward buy ideas (most reliable)
+    # Default: daily buy signals (real-time + backtest validated)
     else:
-        print("💡 No option specified. Sending walk-forward buy recommendations (use --help for options)\n")
-        send_walk_forward_ideas(limit=10, mode="buy")
+        print("💡 No option specified. Sending today's buy signals (use --help for options)\n")
+        send_daily_signals(signal_type="buy", limit=10)

@@ -35,7 +35,7 @@ WORKERS=2  # Reduced from 4 to avoid rate limits
 BATCH_SIZE=100  # Tickers per batch download request (0 = disabled, individual downloads)
 BACKTEST_MODE="both"  # standard, walk-forward, or both
 WALK_FORWARD_LIMIT=50  # Number of tickers for walk-forward analysis
-TELEGRAM_MODE="auto"  # auto, wf, std, all
+TELEGRAM_MODE="signals"  # signals, wf, std, all (signals = today's real-time alerts)
 
 # =========================================================
 # HELPER FUNCTIONS
@@ -60,15 +60,17 @@ OPTIONS:
     --both              Run both standard and walk-forward (default: all tickers)
     --wf-limit N        Number of tickers for walk-forward (default: 50, only for --walk-forward)
     
-    TELEGRAM OPTIONS:
-    --telegram-wf       Send walk-forward alerts (default when --walk-forward used)
-    --telegram-std      Send standard backtest alerts
-    --telegram-all      Send all alerts (walk-forward + standard + portfolio)
+    TELEGRAM OPTIONS (Real-Time Daily Signals Recommended):
+    --telegram-signals  Send today's buy signals with backtest validation (DEFAULT - real-time)
+    --telegram-summary  Send today's signal breakdown summary
+    --telegram-wf       Send walk-forward analysis alerts (anti-overfitting)
+    --telegram-std      Send standard backtest alerts (legacy)
+    --telegram-all      Send comprehensive alerts (signals + walk-forward + backtest)
     
     --help              Show this help message
 
 EXAMPLES:
-    $0                              # Full pipeline: both modes, all tickers
+    $0                              # Full pipeline: both modes, all tickers, daily signals
     $0 --walk-forward               # Walk-forward analysis (anti-overfitting)
     $0 --both                       # Run both standard + walk-forward (all tickers)
     $0 --walk-forward --wf-limit 100  # Walk-forward on 100 tickers
@@ -78,10 +80,13 @@ EXAMPLES:
     $0 --telegram-all               # Send comprehensive alerts
 
 RECOMMENDED:
-    # Daily/Weekly: Walk-forward analysis for buy recommendations
+    # Daily: Real-time signals + backtest validation
+    $0 --telegram-signals
+    
+    # Weekly: Walk-forward analysis for robust recommendations
     $0 --walk-forward --telegram-wf
     
-    # Monthly: Compare both methods
+    # Monthly: Comprehensive comparison
     $0 --both --telegram-all
 
 EOF
@@ -169,6 +174,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --telegram-all)
             TELEGRAM_MODE="all"
+            shift
+            ;;
+        --telegram-signals)
+            TELEGRAM_MODE="signals"
+            shift
+            ;;
+        --telegram-summary)
+            TELEGRAM_MODE="summary"
             shift
             ;;
         --help)
@@ -259,11 +272,11 @@ START_TIME=$(date +%s)
 STEP1_START=$(date +%s)
 
 if [ "$SKIP_DOWNLOAD" = true ]; then
-    log_warn "[1/4] Skipping data download (--skip-download)"
+    log_warn "[1/5] Skipping data download (--skip-download)"
     echo ""
     DOWNLOAD_TIME=0
 else
-    log_step "[1/4] Downloading stock data..."
+    log_step "[1/5] Downloading stock data..."
     echo ""
     
     CMD="$PYTHON incremental_collector.py --workers $WORKERS --batch-size $BATCH_SIZE"
@@ -288,7 +301,7 @@ fi
 
 STEP2_START=$(date +%s)
 
-log_step "[2/4] Generating features..."
+log_step "[2/5] Generating features..."
 echo ""
 
 if $PYTHON feature_engine.py; then
@@ -302,12 +315,31 @@ else
 fi
 
 # =========================================================
-# STEP 3: Backtest Strategies
+# STEP 3: Generate Trading Signals
 # =========================================================
 
 STEP3_START=$(date +%s)
 
-log_step "[3/4] Backtesting strategies..."
+log_step "[3/5] Generating trading signals..."
+echo ""
+
+if $PYTHON signal_engine.py; then
+    SIGNAL_TIME=$(($(date +%s) - STEP3_START))
+    log_step "✓ Signal generation complete"
+    log_info "Time: $(format_time $SIGNAL_TIME)"
+    echo ""
+else
+    log_error "✗ Signal generation failed"
+    exit 1
+fi
+
+# =========================================================
+# STEP 4: Backtest Strategies
+# =========================================================
+
+STEP4_START=$(date +%s)
+
+log_step "[4/5] Backtesting strategies..."
 echo ""
 
 BACKTEST_SUCCESS=true
@@ -350,7 +382,7 @@ elif [ "$BACKTEST_MODE" = "walk-forward" ]; then
 fi
 
 if [ "$BACKTEST_SUCCESS" = true ]; then
-    BACKTEST_TIME=$(($(date +%s) - STEP3_START))
+    BACKTEST_TIME=$(($(date +%s) - STEP4_START))
     log_step "✓ Backtesting complete"
     log_info "Time: $(format_time $BACKTEST_TIME)"
     echo ""
@@ -360,37 +392,35 @@ else
 fi
 
 # =========================================================
-# STEP 4: Send Telegram Notification
+# STEP 5: Send Telegram Notification
 # =========================================================
 
-STEP4_START=$(date +%s)
+STEP5_START=$(date +%s)
 
 if [ "$SKIP_TELEGRAM" = true ]; then
-    log_warn "[4/4] Skipping Telegram notification (--skip-telegram)"
+    log_warn "[5/5] Skipping Telegram notification (--skip-telegram)"
     echo ""
     TELEGRAM_TIME=0
 else
-    log_step "[4/4] Sending Telegram notification..."
+    log_step "[5/5] Sending Telegram notification..."
     echo ""
     
-    # Determine telegram mode based on backtest mode if auto
-    if [ "$TELEGRAM_MODE" = "auto" ]; then
-        case $BACKTEST_MODE in
-            walk-forward)
-                TELEGRAM_MODE="wf"
-                ;;
-            standard)
-                TELEGRAM_MODE="std"
-                ;;
-            both)
-                TELEGRAM_MODE="all"
-                ;;
-        esac
+    # Determine telegram mode based on backtest mode if not explicitly set
+    if [ "$TELEGRAM_MODE" = "signals" ]; then
+        TELEGRAM_MODE="signals"  # Explicit, use as-is
     fi
     
     TELEGRAM_CMD="$PYTHON telegram_sender.py"
     
     case $TELEGRAM_MODE in
+        signals)
+            log_info "Sending today's buy signals with backtest validation (REAL-TIME)..."
+            TELEGRAM_CMD="$TELEGRAM_CMD --signals-buy"
+            ;;
+        summary)
+            log_info "Sending today's signal breakdown summary..."
+            TELEGRAM_CMD="$TELEGRAM_CMD --signal-summary"
+            ;;
         wf)
             log_info "Sending walk-forward buy recommendations..."
             TELEGRAM_CMD="$TELEGRAM_CMD --wf-buy"
@@ -400,19 +430,19 @@ else
             TELEGRAM_CMD="$TELEGRAM_CMD --buy"
             ;;
         all)
-            log_info "Sending comprehensive alerts (walk-forward + standard + portfolio)..."
+            log_info "Sending comprehensive alerts (real-time signals + walk-forward + backtest)..."
             TELEGRAM_CMD="$TELEGRAM_CMD --all"
             ;;
     esac
     
     if $TELEGRAM_CMD; then
-        TELEGRAM_TIME=$(($(date +%s) - STEP4_START))
+        TELEGRAM_TIME=$(($(date +%s) - STEP5_START))
         log_step "✓ Telegram notification sent"
         log_info "Time: $(format_time $TELEGRAM_TIME)"
         echo ""
     else
         log_warn "⚠ Telegram notification failed (non-fatal)"
-        TELEGRAM_TIME=$(($(date +%s) - STEP4_START))
+        TELEGRAM_TIME=$(($(date +%s) - STEP5_START))
         echo ""
     fi
 fi
@@ -432,11 +462,34 @@ printf "  %-20s : %s\n" "Backtest mode" "$BACKTEST_MODE"
 if [ "$BACKTEST_MODE" = "walk-forward" ]; then
     printf "  %-20s : %s tickers\n" "Walk-forward limit" "$WALK_FORWARD_LIMIT"
 fi
-printf "  %-20s : %s\n" "Telegram mode" "$TELEGRAM_MODE"
+
+# Format telegram mode for display
+case $TELEGRAM_MODE in
+    signals)
+        TELEGRAM_DISPLAY="Real-time daily signals (validated)"
+        ;;
+    summary)
+        TELEGRAM_DISPLAY="Signal breakdown summary"
+        ;;
+    wf)
+        TELEGRAM_DISPLAY="Walk-forward recommendations"
+        ;;
+    std)
+        TELEGRAM_DISPLAY="Standard backtest alerts"
+        ;;
+    all)
+        TELEGRAM_DISPLAY="Comprehensive (all modes)"
+        ;;
+    *)
+        TELEGRAM_DISPLAY="$TELEGRAM_MODE"
+        ;;
+esac
+printf "  %-20s : %s\n" "Telegram alerts" "$TELEGRAM_DISPLAY"
 echo ""
 echo "Stage Breakdown:"
 printf "  %-20s : %s\n" "Data download" "$(format_time $DOWNLOAD_TIME)"
 printf "  %-20s : %s\n" "Features" "$(format_time $FEATURE_TIME)"
+printf "  %-20s : %s\n" "Trading signals" "$(format_time $SIGNAL_TIME)"
 printf "  %-20s : %s\n" "Backtesting" "$(format_time $BACKTEST_TIME)"
 printf "  %-20s : %s\n" "Telegram" "$(format_time $TELEGRAM_TIME)"
 echo "  ────────────────────────────────"
@@ -445,16 +498,20 @@ echo ""
 echo "Results available in:"
 echo "  📊 database/stock_data.duckdb (data & backtest results)"
 echo "  📈 database/stock_features.parquet (features)"
+echo "  🎯 database/trading_signals.parquet (trading signals)"
 if [ "$BACKTEST_MODE" = "walk-forward" ] || [ "$BACKTEST_MODE" = "both" ]; then
     echo "  🔍 walk_forward_results.csv (anti-overfitting analysis)"
 fi
 echo "  📝 logs/pipeline.log (execution log)"
 echo ""
 log_step "✓ Ready for analysis!"
-if [ "$BACKTEST_MODE" = "walk-forward" ] || [ "$BACKTEST_MODE" = "both" ]; then
-    echo ""
-    log_info "💡 Query walk-forward results:"
-    echo "   python query_backtest_results.py --walk-forward"
-    echo "   python query_backtest_results.py --portfolio 10"
-fi
+echo ""
+log_info "📊 Analyze Results:"
+echo "   python query_backtest_results.py --walk-forward"
+echo "   python query_backtest_results.py --portfolio 10"
+echo ""
+log_info "📈 Send Additional Alerts:"
+echo "   python telegram_sender.py --signals-buy     # Today's buy signals"
+echo "   python telegram_sender.py --wf-buy          # Walk-forward picks"
+echo "   python telegram_sender.py --all             # Comprehensive package"
 echo ""
