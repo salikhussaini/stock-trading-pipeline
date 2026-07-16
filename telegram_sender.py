@@ -107,6 +107,85 @@ def debug_backtest_data():
     
     print("\n" + "=" * 80)
 
+def debug_signals_file():
+    """
+    Debug function to inspect the raw signals parquet file.
+    Shows unique tickers and summary statistics.
+    """
+    print("=" * 80)
+    print("DEBUG: Inspecting signals parquet file...")
+    print("=" * 80)
+    
+    if not SIGNALS_PATH.exists():
+        print(f"⚠️  Signals file not found at: {SIGNALS_PATH}")
+        print("Run: python signal_engine.py")
+        return
+    
+    try:
+        df = pd.read_parquet(SIGNALS_PATH)
+        print(f"\n📊 Signals file info:")
+        print(f"   File path: {SIGNALS_PATH}")
+        print(f"   Total rows: {len(df)}")
+        print(f"   Date range: {df['signal_date'].min()} to {df['signal_date'].max()}")
+        
+        print(f"\n📊 Unique tickers in signals:")
+        unique_tickers = df['ticker'].unique()
+        print(f"   Count: {len(unique_tickers)}")
+        print(f"   Tickers: {sorted(unique_tickers)}")
+        
+        print(f"\n📊 Latest signal date: {df['signal_date'].max()}")
+        latest_df = df[df['signal_date'] == df['signal_date'].max()]
+        print(f"   Signals on this date: {len(latest_df)}")
+        print(f"   Tickers with signals: {sorted(latest_df['ticker'].unique())}")
+        
+        print(f"\n📊 Signal distribution:")
+        print(f"   Buy signals (final_signal=1): {len(df[df['final_signal'] == 1])}")
+        print(f"   Sell signals (final_signal=-1): {len(df[df['final_signal'] == -1])}")
+        print(f"   Neutral (final_signal=0): {len(df[df['final_signal'] == 0])}")
+        
+    except Exception as e:
+        print(f"❌ Error reading signals file: {e}")
+    
+    print("\n" + "=" * 80)
+
+def debug_features_file():
+    """
+    Debug function to inspect the features parquet file.
+    This is what signal_engine reads as input.
+    """
+    print("=" * 80)
+    print("DEBUG: Inspecting features parquet file (signal_engine input)...")
+    print("=" * 80)
+    
+    features_path = Path(__file__).parent / "database" / "stock_features.parquet"
+    
+    if not features_path.exists():
+        print(f"⚠️  Features file not found at: {features_path}")
+        print("Run: python feature_engine.py")
+        return
+    
+    try:
+        df = pd.read_parquet(str(features_path))
+        print(f"\n📊 Features file info:")
+        print(f"   File path: {features_path}")
+        print(f"   Total rows: {len(df)}")
+        print(f"   Date range: {df['report_date'].min()} to {df['report_date'].max()}")
+        
+        print(f"\n📊 Unique tickers in features:")
+        unique_tickers = df['ticker'].unique()
+        print(f"   Count: {len(unique_tickers)}")
+        print(f"   Tickers: {sorted(unique_tickers)}")
+        
+        print(f"\n📊 Ticker value counts:")
+        ticker_counts = df['ticker'].value_counts()
+        for ticker, count in ticker_counts.items():
+            print(f"   {ticker}: {count} rows")
+        
+    except Exception as e:
+        print(f"❌ Error reading features file: {e}")
+    
+    print("\n" + "=" * 80)
+
 # =========================================================
 # QUERY FUNCTIONS
 # =========================================================
@@ -968,6 +1047,8 @@ Examples:
     # Debug options
     parser.add_argument("--debug-signals", action="store_true", help="Debug: Inspect raw signal data and merged results")
     parser.add_argument("--debug-backtest", action="store_true", help="Debug: Inspect backtest database contents")
+    parser.add_argument("--debug-signals-file", action="store_true", help="Debug: Inspect signals parquet file for data quality")
+    parser.add_argument("--debug-features", action="store_true", help="Debug: Inspect features parquet file (signal_engine input)")
     
     # General options
     parser.add_argument("--all", action="store_true", help="Send all alerts (signals + walk-forward + standard)")
@@ -980,6 +1061,10 @@ Examples:
         debug_signals_data()
     elif args.debug_backtest:
         debug_backtest_data()
+    elif args.debug_signals_file:
+        debug_signals_file()
+    elif args.debug_features:
+        debug_features_file()
     # Daily signal alerts (REAL-TIME - most timely)
     elif args.signals_buy:
         send_daily_signals(signal_type="buy", limit=args.limit)
