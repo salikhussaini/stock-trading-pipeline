@@ -258,12 +258,24 @@ def volatility_contraction(df):
 # SIGNAL ENGINE
 # ======================================================
 
-def generate_signals():
+def generate_signals(force=False):
     print("Loading features...")
     df = pd.read_parquet(FEATURE_PATH)
     
     if df.empty:
         raise ValueError(f"No data found in {FEATURE_PATH}")
+    
+    # Check if signals already exist for today
+    today = datetime.today().date()
+    if SIGNAL_PATH.exists() and not force:
+        existing_signals = pd.read_parquet(SIGNAL_PATH)
+        if not existing_signals.empty and existing_signals['signal_date'].max() == today:
+            print(f"✅ Signals already calculated for {today}")
+            print(f"   File: {SIGNAL_PATH}")
+            print(f"   Buy signals: {len(existing_signals[existing_signals['final_signal'] == 1])}")
+            print(f"   Sell signals: {len(existing_signals[existing_signals['final_signal'] == -1])}")
+            print(f"\n💡 Use --force to recalculate: python signal_engine.py --force")
+            return
     
     print(f"Loaded {len(df):,} rows for {df['ticker'].nunique()} tickers")
     df = df.sort_values(["ticker", "report_date"])
@@ -304,7 +316,7 @@ def generate_signals():
     # Store raw score for ranking (telegram will use this)
     df["signal_score"] = df["signal_score_normalized"]
     
-    df["signal_date"] = datetime.today().date()
+    df["signal_date"] = today
     
     print("\n📊 Signal Distribution:")
     print(f"   Buy signals (final_signal=1): {len(df[df['final_signal'] == 1])}")
@@ -329,4 +341,10 @@ def generate_signals():
 
 
 if __name__ == "__main__":
-    generate_signals()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Generate trading signals")
+    parser.add_argument("--force", action="store_true", help="Force recalculation even if signals exist for today")
+    args = parser.parse_args()
+    
+    generate_signals(force=args.force)
