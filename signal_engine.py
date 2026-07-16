@@ -569,12 +569,6 @@ def generate_signals(force=False):
     print(f"Loaded {len(df):,} rows for {df['ticker'].nunique()} tickers")
     df = df.sort_values(["ticker", "report_date"])
     
-    print("\n📊 Strategy Weights (independence-adjusted):")
-    print("   High independence (1.0x): 3 strategies")
-    print("   Medium independence (0.9x): 5 strategies")  
-    print("   Low independence (0.75x): 7 strategies (RSI-correlated)")
-    print(f"   Max weighted score: {sum([1.0*3, 0.9*5, 0.75*7]):.1f} (vs 15.0 unweighted)")
-    
     strategies = {
         "trend_following": trend_following,
         "momentum": momentum_strategy,
@@ -586,36 +580,11 @@ def generate_signals(force=False):
         "macd_crossover": macd_crossover,
         "stochastic_oscillator": stochastic_oscillator,
         "volume_trend": volume_trend,
-        "adx_strength_only": adx_strength_only,              # NEW
-        "price_action": price_action,                        # NEW
-        "bb_squeeze_breakout": bb_squeeze_breakout,          # NEW
-        "return_magnitude": return_magnitude,                # NEW
-        "rsi_extremes": rsi_extremes                         # NEW
-    }
-    
-    # Strategy weights to reduce correlation effects
-    # Lower weight = more correlated with other strategies
-    strategy_weights = {
-        # High independence (1.0x) - unique feature combinations
-        "trend_following": 1.0,           # SMA + MACD + ADX
-        "macd_crossover": 1.0,            # MACD histogram focus
-        "breakout": 1.0,                  # BB + volume + ADX combination
-        
-        # Medium independence (0.9x) - some feature overlap
-        "volume_analysis": 0.9,           # Volume + return
-        "volume_trend": 0.9,              # Volume + return (similar to above)
-        "volatility_contraction": 0.9,    # BB squeeze
-        "bb_squeeze_breakout": 0.9,       # BB breakout (similar to above)
-        "return_magnitude": 0.9,          # Pure return
-        
-        # Low independence (0.75x) - heavy RSI correlation
-        "momentum": 0.75,                  # RSI + volume
-        "mean_reversion": 0.75,            # BB + RSI
-        "rsi_divergence": 0.75,            # RSI + BB
-        "stochastic_oscillator": 0.75,     # RSI fallback
-        "adx_strength_only": 0.75,         # ADX + RSI
-        "price_action": 0.75,              # RSI + return
-        "rsi_extremes": 0.75               # Pure RSI
+        "adx_strength_only": adx_strength_only,
+        "price_action": price_action,
+        "bb_squeeze_breakout": bb_squeeze_breakout,
+        "return_magnitude": return_magnitude,
+        "rsi_extremes": rsi_extremes
     }
     
     # Apply each strategy
@@ -626,25 +595,16 @@ def generate_signals(force=False):
             signals.append(strategy(group.reset_index(drop=True)))
         df[name] = np.concatenate(signals)
     
-    # Ensemble voting with confidence scores and independence weights
-    # Apply weights to reduce correlation effects
+    # Ensemble voting: sum all strategy scores
+    # Range: -15 to +15 (15 strategies with confidence levels 0.25/0.5/0.75/1.0)
     strategy_cols = list(strategies.keys())
-    
-    # Calculate weighted sum
-    df["signal_score_raw"] = 0.0
-    for col in strategy_cols:
-        weight = strategy_weights[col]
-        df["signal_score_raw"] += df[col] * weight
-    
-    # Max possible weighted score: sum of all weights = 1.0*3 + 0.9*5 + 0.75*7 = 3 + 4.5 + 5.25 = 12.75
-    max_weighted_score = sum(strategy_weights.values())
+    df["signal_score_raw"] = df[strategy_cols].sum(axis=1)
     
     # Scale to 0-4 range for display consistency
-    # With weights: max_weighted_score → 4.0, preserves relative differentiation
-    df["signal_score"] = (df["signal_score_raw"] / max_weighted_score * 4.0).clip(-4, 4)
+    # Preserves differentiation: raw 15 → 4.0, raw 10 → 2.67, raw 5 → 1.33
+    df["signal_score"] = (df["signal_score_raw"] / 15.0 * 4.0).clip(-4, 4)
     
-    # Final signal: requires consensus (1.5+ on 0-4 scale)
-    # 1.5/4 = 37.5% of max score = ~4.2 weighted points
+    # Final signal: requires consensus (1.5+ on 0-4 scale = ~5.6 raw = 37% of strategies)
     df["final_signal"] = 0
     df.loc[df["signal_score"] >= 1.5, "final_signal"] = 1
     df.loc[df["signal_score"] <= -1.5, "final_signal"] = -1
@@ -659,10 +619,9 @@ def generate_signals(force=False):
     print(f"\n📊 Signal Score Distribution (Buy signals only):")
     buy_signals = df[df["final_signal"] == 1]["signal_score"]
     if len(buy_signals) > 0:
-        print(f"   Mean: {buy_signals.mean():.2f}")
+        print(f"   Mean: {buy_signals.mean():.2f}/4")
         print(f"   Min: {buy_signals.min():.2f}, Max: {buy_signals.max():.2f}")
-        print(f"   Median: {buy_signals.median():.2f}")
-        print(f"   Weighted raw scores: {df[df['final_signal'] == 1]['signal_score_raw'].mean():.2f} avg (max {max_weighted_score:.1f})")
+        print(f"   Median: {buy_signals.median():.2f}/4")
         print(f"   Score distribution:")
         for score in sorted(buy_signals.unique(), reverse=True):
             count = len(buy_signals[buy_signals == score])
