@@ -604,10 +604,11 @@ def generate_signals(force=False):
     # Preserves differentiation: raw 15 → 4.0, raw 10 → 2.67, raw 5 → 1.33
     df["signal_score"] = (df["signal_score_raw"] / 15.0 * 4.0).clip(-4, 4)
     
-    # Final signal: requires consensus (1.5+ on 0-4 scale = ~5.6 raw = 37% of strategies)
+    # Final signal: requires MAJORITY consensus (2.0+ on 0-4 scale = ~7.5 raw = 50% of strategies)
+    # This ensures we only act on strong setups where multiple indicators align
     df["final_signal"] = 0
-    df.loc[df["signal_score"] >= 1.5, "final_signal"] = 1
-    df.loc[df["signal_score"] <= -1.5, "final_signal"] = -1
+    df.loc[df["signal_score"] >= 2.0, "final_signal"] = 1
+    df.loc[df["signal_score"] <= -2.0, "final_signal"] = -1
     
     df["signal_date"] = today
     
