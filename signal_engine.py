@@ -604,13 +604,21 @@ def generate_signals(force=False):
     # Preserves differentiation: raw 15 → 4.0, raw 10 → 2.67, raw 5 → 1.33
     df["signal_score"] = (df["signal_score_raw"] / 15.0 * 4.0).clip(-4, 4)
     
-    # Final signal: requires MAJORITY consensus (2.0+ on 0-4 scale = ~7.5 raw = 50% of strategies)
-    # This ensures we only act on strong setups where multiple indicators align
+    # Final signal: requires consensus (1.5+ on 0-4 scale = ~5.6 raw = 37% of strategies)
+    # Lower threshold to ensure we capture signals, composite scoring handles quality filtering
     df["final_signal"] = 0
-    df.loc[df["signal_score"] >= 2.0, "final_signal"] = 1
-    df.loc[df["signal_score"] <= -2.0, "final_signal"] = -1
+    df.loc[df["signal_score"] >= 1.5, "final_signal"] = 1
+    df.loc[df["signal_score"] <= -1.5, "final_signal"] = -1
     
     df["signal_date"] = today
+    
+    print("\n📊 Signal Score Statistics (ALL signals):")
+    print(f"   Mean: {df['signal_score'].mean():.2f}/4")
+    print(f"   Min: {df['signal_score'].min():.2f}, Max: {df['signal_score'].max():.2f}")
+    print(f"   Median: {df['signal_score'].median():.2f}/4")
+    print(f"   Scores >= 2.0: {len(df[df['signal_score'] >= 2.0]):,}")
+    print(f"   Scores >= 1.5: {len(df[df['signal_score'] >= 1.5]):,}")
+    print(f"   Scores >= 1.0: {len(df[df['signal_score'] >= 1.0]):,}")
     
     print("\n📊 Signal Distribution:")
     print(f"   Buy signals (final_signal=1): {len(df[df['final_signal'] == 1])}")
