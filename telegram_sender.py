@@ -79,11 +79,6 @@ def debug_backtest_data():
     conn = duckdb.connect(str(DB_PATH), read_only=True)
     
     try:
-        # Check if table exists
-        tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema='memory'"
-        tables_result = conn.execute(tables_query).fetchall()
-        print(f"\nAvailable tables: {tables_result}")
-        
         # Sample backtest data
         sample_query = """
         SELECT 
@@ -95,10 +90,45 @@ def debug_backtest_data():
         LIMIT 5
         """
         sample_df = conn.execute(sample_query).df()
+        
+        print(f"\n📊 Total rows in backtest_results: {conn.execute('SELECT COUNT(*) FROM backtest_results').fetchall()[0][0]}")
+        print(f"\n📊 Unique tickers in backtest_results:")
+        unique_query = "SELECT COUNT(DISTINCT ticker) as ticker_count FROM backtest_results"
+        ticker_count = conn.execute(unique_query).fetchall()[0][0]
+        print(f"   Count: {ticker_count}")
+        
+        tickers_query = "SELECT DISTINCT ticker FROM backtest_results ORDER BY ticker LIMIT 50"
+        tickers_df = conn.execute(tickers_query).df()
+        print(f"   Tickers: {sorted(tickers_df['ticker'].tolist())}")
+        
         print(f"\n📊 Sample backtest_results:")
         print(sample_df)
         
-        print(f"\nUnique tickers in backtest: {sample_df['ticker'].unique()}")
+        # Check the merge that happens in get_signals_with_backtest_validation
+        print(f"\n📊 Checking merge compatibility:")
+        merge_query = """
+        SELECT 
+            COUNT(*) as total_signal_rows,
+            COUNT(DISTINCT s.ticker) as signal_tickers
+        FROM (
+            SELECT DISTINCT ticker FROM (
+                SELECT ticker FROM """ + str(SIGNALS_PATH).replace("'", "''") + """ 
+                WHERE final_signal = 1
+            )
+        ) s
+        """
+        
+        # Count tickers that would match in backtest after inner join
+        match_query = """
+        SELECT 
+            COUNT(DISTINCT b.ticker) as matching_tickers
+        FROM (
+            SELECT DISTINCT ticker FROM backtest_results
+            WHERE total_return > 0 AND sharpe_ratio > 0.5
+        ) b
+        """
+        matching = conn.execute(match_query).fetchall()[0][0]
+        print(f"   Backtest tickers with positive return & sharpe>0.5: {matching}")
         
     except Exception as e:
         print(f"❌ Error querying backtest database: {e}")
