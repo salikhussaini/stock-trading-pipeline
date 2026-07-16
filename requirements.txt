@@ -3,10 +3,13 @@ certifi==2026.6.17
 cffi==2.0.0
 charset-normalizer==3.4.7
 colorama==0.4.6
+cramjam==2.11.0
 curl_cffi==0.15.0
 dotenv==0.9.9
 duckdb==1.5.4
+fastparquet==2026.5.0
 frozendict==2.4.7
+fsspec==2026.6.0
 html5lib==1.1
 idna==3.18
 lxml==6.1.1
@@ -14,6 +17,7 @@ markdown-it-py==4.2.0
 mdurl==0.1.2
 multitasking==0.0.13
 numpy==2.5.0
+packaging==26.2
 pandas==3.0.3
 peewee==4.1.1
 platformdirs==4.10.0
