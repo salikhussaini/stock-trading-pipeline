@@ -599,19 +599,16 @@ def generate_signals(force=False):
     # Sum all strategy signals (each 0 to 1, or -1 to 0)
     # Possible range: -15 to +15 (15 strategies)
     strategy_cols = list(strategies.keys())
-    df["signal_score"] = df[strategy_cols].sum(axis=1)
+    df["signal_score_raw"] = df[strategy_cols].sum(axis=1)
     
-    # Convert to 0-4 scale for consistency with old system
-    # -15 to -4 → -4/4, -3 to 0 → 0/4, 0 to 3 → 0 to 3/4, 4 to 15 → 4/4
-    df["signal_score_normalized"] = df["signal_score"].clip(-4, 4)
+    # Scale to 0-4 range for display consistency (15 strategies → 4 max)
+    # This preserves differentiation: 15 → 4.0, 10 → 2.67, 5 → 1.33
+    df["signal_score"] = (df["signal_score_raw"] / 15.0 * 4.0).clip(-4, 4)
     
-    # Final signal: requires consensus (1+ votes in confidence scale)
+    # Final signal: requires consensus (1.5+ on 0-4 scale = ~5.6 raw score = ~37% strategies)
     df["final_signal"] = 0
-    df.loc[df["signal_score_normalized"] >= 1.5, "final_signal"] = 1    # 2+ moderate signals
-    df.loc[df["signal_score_normalized"] <= -1.5, "final_signal"] = -1
-    
-    # Store raw score for ranking (telegram will use this)
-    df["signal_score"] = df["signal_score_normalized"]
+    df.loc[df["signal_score"] >= 1.5, "final_signal"] = 1    # ~6+ strategy points
+    df.loc[df["signal_score"] <= -1.5, "final_signal"] = -1
     
     df["signal_date"] = today
     
