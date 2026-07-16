@@ -253,6 +253,295 @@ def volatility_contraction(df):
     return signal
 
 
+def macd_crossover(df):
+    """
+    MACD Crossover strategy (NEW).
+    MACD line crossing signal line with histogram confirmation.
+    """
+    signal = np.zeros(len(df))
+    
+    # Bullish crossover: MACD histogram > 0 and increasing
+    # Weak: Just positive histogram
+    weak_bullish = df["lt_macd_histogram"] > 0
+    # Moderate: Positive histogram + strong histogram value
+    moderate_bullish = (df["lt_macd_histogram"] > 0) & (df["lt_macd_histogram"] > 0.5)
+    # Strong: Positive + confirmed by trend
+    strong_bullish = (df["lt_macd_histogram"] > 0) & (df["lt_sma_alignment"] == 1)
+    # Very strong: All conditions + ADX
+    very_strong_bullish = strong_bullish & (df["lt_adx_14"] > 25)
+    
+    signal[weak_bullish] = 0.25
+    signal[moderate_bullish] = 0.5
+    signal[strong_bullish] = 0.75
+    signal[very_strong_bullish] = 1.0
+    
+    # Bearish crossover: MACD histogram < 0
+    weak_bearish = df["lt_macd_histogram"] < 0
+    moderate_bearish = (df["lt_macd_histogram"] < 0) & (df["lt_macd_histogram"] < -0.5)
+    strong_bearish = (df["lt_macd_histogram"] < 0) & (df["lt_sma_alignment"] == 0)
+    very_strong_bearish = strong_bearish & (df["lt_adx_14"] > 25)
+    
+    signal[weak_bearish] = -0.25
+    signal[moderate_bearish] = -0.5
+    signal[strong_bearish] = -0.75
+    signal[very_strong_bearish] = -1.0
+    
+    return signal
+
+
+def stochastic_oscillator(df):
+    """
+    Stochastic Oscillator strategy (NEW).
+    %K and %D crossovers with overbought/oversold levels.
+    """
+    signal = np.zeros(len(df))
+    
+    # Check if stochastic features exist, otherwise use RSI as proxy
+    if "st_stoch_k_14" in df.columns and "st_stoch_d_14" in df.columns:
+        stoch_k = df["st_stoch_k_14"]
+        stoch_d = df["st_stoch_d_14"]
+    else:
+        # Fallback: Use RSI as proxy (already exists)
+        stoch_k = df["st_rsi_14"]
+        stoch_d = df["st_rsi_14"].rolling(3, min_periods=1).mean()
+    
+    # Bullish: K > D (upward cross) or oversold
+    oversold = stoch_k < 20
+    extreme_oversold = stoch_k < 10
+    k_above_d = stoch_k > stoch_d
+    
+    # Very strong: Extreme oversold + K above D
+    signal[extreme_oversold & k_above_d] = 1.0
+    # Strong: Oversold + K above D
+    signal[oversold & k_above_d] = 0.75
+    # Moderate: Just K above D (bullish cross)
+    signal[k_above_d & (stoch_k < 50)] = 0.5
+    # Weak: K in oversold zone
+    signal[oversold] = 0.25
+    
+    # Bearish: K < D (downward cross) or overbought
+    overbought = stoch_k > 80
+    extreme_overbought = stoch_k > 90
+    k_below_d = stoch_k < stoch_d
+    
+    signal[extreme_overbought & k_below_d] = -1.0
+    signal[overbought & k_below_d] = -0.75
+    signal[k_below_d & (stoch_k > 50)] = -0.5
+    signal[overbought] = -0.25
+    
+    return signal
+
+
+def volume_trend(df):
+    """
+    Volume Trend strategy (NEW).
+    Volume increases on up days, decreases on down days (institutional interest).
+    """
+    signal = np.zeros(len(df))
+    
+    # Bullish: Positive return + high volume ratio
+    positive_return = df["st_return_5d"] > 0
+    high_volume = df["st_volume_ratio_5d"] > 1.3
+    extreme_volume = df["st_volume_ratio_5d"] > 1.8
+    
+    large_positive = df["st_return_5d"] > 0.05  # 5%+ move
+    
+    # Very strong: Large positive return + extreme volume
+    signal[large_positive & extreme_volume] = 1.0
+    # Strong: Positive return + extreme volume
+    signal[positive_return & extreme_volume] = 0.75
+    # Moderate: Positive return + high volume
+    signal[positive_return & high_volume] = 0.5
+    # Weak: Just positive return (light volume)
+    signal[positive_return & (df["st_volume_ratio_5d"] > 1.0)] = 0.25
+    
+    # Bearish: Negative return + high volume
+    negative_return = df["st_return_5d"] < 0
+    large_negative = df["st_return_5d"] < -0.05
+    
+    signal[large_negative & extreme_volume] = -1.0
+    signal[negative_return & extreme_volume] = -0.75
+    signal[negative_return & high_volume] = -0.5
+    signal[negative_return & (df["st_volume_ratio_5d"] > 1.0)] = -0.25
+    
+    return signal
+
+
+def adx_strength_only(df):
+    """
+    ADX Strength Only strategy (NEW).
+    Strong trend without directional bias - confirms momentum exists.
+    Works well with other directional indicators.
+    """
+    signal = np.zeros(len(df))
+    
+    # Strong trend detected (ADX > 25)
+    strong_trend = df["lt_adx_14"] > 25
+    very_strong_trend = df["lt_adx_14"] > 35
+    extreme_trend = df["lt_adx_14"] > 45
+    
+    # Combine with RSI for direction
+    rsi_bullish = df["st_rsi_14"] > 50
+    rsi_bearish = df["st_rsi_14"] < 50
+    
+    # Bullish: Strong trend + RSI above 50
+    signal[strong_trend & rsi_bullish] = 0.25
+    signal[very_strong_trend & rsi_bullish] = 0.5
+    signal[extreme_trend & rsi_bullish] = 0.75
+    signal[extreme_trend & rsi_bullish & (df["st_return_5d"] > 0)] = 1.0
+    
+    # Bearish: Strong trend + RSI below 50
+    signal[strong_trend & rsi_bearish] = -0.25
+    signal[very_strong_trend & rsi_bearish] = -0.5
+    signal[extreme_trend & rsi_bearish] = -0.75
+    signal[extreme_trend & rsi_bearish & (df["st_return_5d"] < 0)] = -1.0
+    
+    return signal
+
+
+def price_action(df):
+    """
+    Price Action strategy (NEW).
+    Based on RSI position and recent return momentum (swing highs/lows proxy).
+    """
+    signal = np.zeros(len(df))
+    
+    # Bullish: Higher lows pattern (RSI making higher lows)
+    # Proxy: RSI above 40 but below 60 with positive return
+    rsi_higher_low = (df["st_rsi_14"] > 40) & (df["st_rsi_14"] < 60)
+    positive_return = df["st_return_5d"] > 0
+    strong_positive = df["st_return_5d"] > 0.03
+    
+    # Very strong: Recent strong move + RSI recovery
+    signal[(df["st_return_5d"] > 0.08) & (df["st_rsi_14"] > 45)] = 1.0
+    # Strong: Positive return + RSI recovery
+    signal[strong_positive & (df["st_rsi_14"] > 50)] = 0.75
+    # Moderate: Positive return + neutral RSI
+    signal[positive_return & rsi_higher_low] = 0.5
+    # Weak: Just positive return
+    signal[positive_return & (df["st_rsi_14"] < 40)] = 0.25
+    
+    # Bearish: Lower highs pattern (RSI making lower highs)
+    rsi_lower_high = (df["st_rsi_14"] > 40) & (df["st_rsi_14"] < 60)
+    negative_return = df["st_return_5d"] < 0
+    strong_negative = df["st_return_5d"] < -0.03
+    
+    signal[(df["st_return_5d"] < -0.08) & (df["st_rsi_14"] < 55)] = -1.0
+    signal[strong_negative & (df["st_rsi_14"] < 50)] = -0.75
+    signal[negative_return & rsi_lower_high] = -0.5
+    signal[negative_return & (df["st_rsi_14"] > 60)] = -0.25
+    
+    return signal
+
+
+def bb_squeeze_breakout(df):
+    """
+    Bollinger Band Squeeze Breakout strategy (NEW).
+    Detects narrow bands (squeeze) and subsequent breakouts.
+    Different from volatility_contraction - focuses on actual breakout confirmation.
+    """
+    signal = np.zeros(len(df))
+    
+    # Breakout above upper band with strong volume
+    upper_extreme = df["lt_bb_position"] > 0.95
+    upper_strong = df["lt_bb_position"] > 0.85
+    volume_surge = df["st_volume_ratio_5d"] > 1.3
+    
+    # Very strong: Extreme upper + volume + positive return
+    signal[upper_extreme & volume_surge & (df["st_return_5d"] > 0.02)] = 1.0
+    # Strong: Strong upper + volume
+    signal[upper_strong & volume_surge] = 0.75
+    # Moderate: Upper + moderate volume
+    signal[upper_strong & (df["st_volume_ratio_5d"] > 1.0)] = 0.5
+    # Weak: Just upper extreme
+    signal[upper_extreme] = 0.25
+    
+    # Breakout below lower band with strong volume
+    lower_extreme = df["lt_bb_position"] < 0.05
+    lower_strong = df["lt_bb_position"] < 0.15
+    
+    signal[lower_extreme & volume_surge & (df["st_return_5d"] < -0.02)] = -1.0
+    signal[lower_strong & volume_surge] = -0.75
+    signal[lower_strong & (df["st_volume_ratio_5d"] > 1.0)] = -0.5
+    signal[lower_extreme] = -0.25
+    
+    return signal
+
+
+def return_magnitude(df):
+    """
+    Return Magnitude strategy (NEW).
+    Pure return-based signal - captures directional moves.
+    Different from volume_trend as it ignores volume.
+    """
+    signal = np.zeros(len(df))
+    
+    # Bullish: Recent strong positive returns
+    extreme_return = df["st_return_5d"] > 0.10  # 10%+ move
+    large_return = df["st_return_5d"] > 0.05   # 5%+ move
+    moderate_return = df["st_return_5d"] > 0.02  # 2%+ move
+    positive_return = df["st_return_5d"] > 0
+    
+    # Very strong: Extreme move
+    signal[extreme_return] = 1.0
+    # Strong: Large move
+    signal[large_return & ~extreme_return] = 0.75
+    # Moderate: Moderate move
+    signal[moderate_return & ~large_return] = 0.5
+    # Weak: Any positive move
+    signal[positive_return & ~moderate_return] = 0.25
+    
+    # Bearish: Recent strong negative returns
+    extreme_negative = df["st_return_5d"] < -0.10
+    large_negative = df["st_return_5d"] < -0.05
+    moderate_negative = df["st_return_5d"] < -0.02
+    negative_return = df["st_return_5d"] < 0
+    
+    signal[extreme_negative] = -1.0
+    signal[large_negative & ~extreme_negative] = -0.75
+    signal[moderate_negative & ~large_negative] = -0.5
+    signal[negative_return & ~moderate_negative] = -0.25
+    
+    return signal
+
+
+def rsi_extremes(df):
+    """
+    RSI Extremes strategy (NEW).
+    Pure RSI-based strategy focusing on extreme levels.
+    Different from momentum_strategy - no volume confirmation.
+    """
+    signal = np.zeros(len(df))
+    
+    # Bullish extremes
+    extreme_oversold = df["st_rsi_14"] < 10
+    very_oversold = df["st_rsi_14"] < 20
+    oversold = df["st_rsi_14"] < 30
+    mildly_oversold = df["st_rsi_14"] < 40
+    
+    # Very strong: Extreme oversold
+    signal[extreme_oversold] = 1.0
+    # Strong: Very oversold
+    signal[very_oversold & ~extreme_oversold] = 0.75
+    # Moderate: Oversold
+    signal[oversold & ~very_oversold] = 0.5
+    # Weak: Mildly oversold
+    signal[mildly_oversold & ~oversold] = 0.25
+    
+    # Bearish extremes
+    extreme_overbought = df["st_rsi_14"] > 90
+    very_overbought = df["st_rsi_14"] > 80
+    overbought = df["st_rsi_14"] > 70
+    mildly_overbought = df["st_rsi_14"] > 60
+    
+    signal[extreme_overbought] = -1.0
+    signal[very_overbought & ~extreme_overbought] = -0.75
+    signal[overbought & ~very_overbought] = -0.5
+    signal[mildly_overbought & ~overbought] = -0.25
+    
+    return signal
+
+
 
 # ======================================================
 # SIGNAL ENGINE
@@ -285,9 +574,17 @@ def generate_signals(force=False):
         "momentum": momentum_strategy,
         "mean_reversion": mean_reversion,
         "breakout": breakout_strategy,
-        "rsi_divergence": rsi_divergence,           # NEW
-        "volume_analysis": volume_analysis,         # NEW
-        "volatility_contraction": volatility_contraction  # NEW
+        "rsi_divergence": rsi_divergence,
+        "volume_analysis": volume_analysis,
+        "volatility_contraction": volatility_contraction,
+        "macd_crossover": macd_crossover,
+        "stochastic_oscillator": stochastic_oscillator,
+        "volume_trend": volume_trend,
+        "adx_strength_only": adx_strength_only,              # NEW
+        "price_action": price_action,                        # NEW
+        "bb_squeeze_breakout": bb_squeeze_breakout,          # NEW
+        "return_magnitude": return_magnitude,                # NEW
+        "rsi_extremes": rsi_extremes                         # NEW
     }
     
     # Apply each strategy
@@ -300,12 +597,12 @@ def generate_signals(force=False):
     
     # Ensemble voting with confidence scores
     # Sum all strategy signals (each 0 to 1, or -1 to 0)
-    # Possible range: -7 to +7 (7 strategies)
+    # Possible range: -15 to +15 (15 strategies)
     strategy_cols = list(strategies.keys())
     df["signal_score"] = df[strategy_cols].sum(axis=1)
     
     # Convert to 0-4 scale for consistency with old system
-    # -7 to -4 → -4/4, -3 to 0 → 0/4, 0 to 3 → 0 to 3/4, 4 to 7 → 4/4
+    # -15 to -4 → -4/4, -3 to 0 → 0/4, 0 to 3 → 0 to 3/4, 4 to 15 → 4/4
     df["signal_score_normalized"] = df["signal_score"].clip(-4, 4)
     
     # Final signal: requires consensus (1+ votes in confidence scale)
