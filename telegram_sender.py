@@ -431,7 +431,7 @@ def get_daily_signals(signal_type="buy", limit=10):
     
     Args:
         signal_type: "buy" (final_signal==1), "sell" (final_signal==-1), or "all"
-        limit: Number of signals to return (will return up to limit unique tickers)
+        limit: Number of signals to return (None or -1 for all signals)
     """
     if not SIGNALS_PATH.exists():
         print(f"⚠️  Trading signals not found. Run: python signal_engine.py")
@@ -460,6 +460,9 @@ def get_daily_signals(signal_type="buy", limit=10):
     # Sort by signal consensus (higher = stronger)
     df = df.sort_values('signal_score', ascending=False)
     
+    # Return all or limited based on limit parameter
+    if limit is None or limit == -1:
+        return df
     return df.head(limit)
 
 def get_signals_with_backtest_validation(signal_type="buy", limit=10):
@@ -476,7 +479,9 @@ def get_signals_with_backtest_validation(signal_type="buy", limit=10):
         signal_type: "buy" or "sell"
         limit: Number of results to return
     """
-    signals_df = get_daily_signals(signal_type=signal_type, limit=50)
+    # Pull all available signals to have best filtering options
+    # Stronger signals (3-4/4) will rank higher in composite score
+    signals_df = get_daily_signals(signal_type=signal_type, limit=-1)
     
     if signals_df.empty:
         return pd.DataFrame()
