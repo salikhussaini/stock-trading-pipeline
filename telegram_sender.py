@@ -137,6 +137,92 @@ def debug_backtest_data():
     
     print("\n" + "=" * 80)
 
+def debug_merge_step_by_step():
+    """
+    Debug the merge process step-by-step to find where ticker data is lost.
+    """
+    print("=" * 80)
+    print("DEBUG: Tracing merge process step-by-step...")
+    print("=" * 80)
+    
+    # Step 1: Get daily signals
+    print("\n🔍 Step 1: Read raw signals")
+    signals_df = get_daily_signals(signal_type="buy", limit=50)
+    print(f"   Rows: {len(signals_df)}")
+    print(f"   Unique tickers: {signals_df['ticker'].nunique()}")
+    print(f"   Sample tickers: {signals_df['ticker'].unique()[:10]}")
+    print(f"   First row ticker: {signals_df.iloc[0]['ticker'] if len(signals_df) > 0 else 'N/A'}")
+    
+    if signals_df.empty:
+        print("   ❌ Signals dataframe is empty!")
+        return
+    
+    # Step 2: Query backtest data
+    print("\n🔍 Step 2: Query backtest data (matching criteria)")
+    conn = duckdb.connect(str(DB_PATH), read_only=True)
+    
+    backtest_query = """
+    WITH best_strategy AS (
+        SELECT 
+            ticker,
+            strategy_name,
+            total_return,
+            sharpe_ratio,
+            win_rate,
+            num_trades,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY sharpe_ratio DESC) as rn
+        FROM backtest_results
+        WHERE total_return > 0
+        AND sharpe_ratio > 0.5
+    )
+    SELECT 
+        ticker,
+        strategy_name as best_strategy,
+        ROUND(total_return, 2) as backtest_return,
+        ROUND(sharpe_ratio, 2) as backtest_sharpe
+    FROM best_strategy
+    WHERE rn = 1
+    """
+    
+    backtest_df = conn.execute(backtest_query).df()
+    conn.close()
+    
+    print(f"   Rows: {len(backtest_df)}")
+    print(f"   Unique tickers: {backtest_df['ticker'].nunique()}")
+    print(f"   Sample tickers: {backtest_df['ticker'].unique()[:10]}")
+    print(f"   First row ticker: {backtest_df.iloc[0]['ticker'] if len(backtest_df) > 0 else 'N/A'}")
+    
+    # Step 3: Check columns
+    print("\n🔍 Step 3: Check columns before merge")
+    print(f"   Signals columns: {signals_df.columns.tolist()}")
+    print(f"   Backtest columns: {backtest_df.columns.tolist()}")
+    print(f"   Merge key 'ticker' in signals: {'ticker' in signals_df.columns}")
+    print(f"   Merge key 'ticker' in backtest: {'ticker' in backtest_df.columns}")
+    
+    # Step 4: Do the merge
+    print("\n🔍 Step 4: Perform inner join merge")
+    print(f"   Signals to merge: {len(signals_df)} rows")
+    print(f"   Backtest to merge: {len(backtest_df)} rows")
+    
+    result = signals_df.merge(
+        backtest_df,
+        on='ticker',
+        how='inner'
+    )
+    
+    print(f"   Result after merge: {len(result)} rows")
+    print(f"   Result unique tickers: {result['ticker'].nunique()}")
+    print(f"   Result sample tickers: {result['ticker'].unique()[:10]}")
+    print(f"   Result first row ticker: {result.iloc[0]['ticker'] if len(result) > 0 else 'N/A'}")
+    
+    # Step 5: Head
+    print("\n🔍 Step 5: Apply .head(10)")
+    final = result.head(10)
+    print(f"   Final rows: {len(final)}")
+    print(f"   Final tickers: {final['ticker'].tolist()}")
+    
+    print("\n" + "=" * 80)
+
 def debug_signals_file():
     """
     Debug function to inspect the raw signals parquet file.
@@ -1079,6 +1165,7 @@ Examples:
     parser.add_argument("--debug-backtest", action="store_true", help="Debug: Inspect backtest database contents")
     parser.add_argument("--debug-signals-file", action="store_true", help="Debug: Inspect signals parquet file for data quality")
     parser.add_argument("--debug-features", action="store_true", help="Debug: Inspect features parquet file (signal_engine input)")
+    parser.add_argument("--debug-merge", action="store_true", help="Debug: Trace merge process step-by-step")
     
     # General options
     parser.add_argument("--all", action="store_true", help="Send all alerts (signals + walk-forward + standard)")
@@ -1095,6 +1182,8 @@ Examples:
         debug_signals_file()
     elif args.debug_features:
         debug_features_file()
+    elif args.debug_merge:
+        debug_merge_step_by_step()
     # Daily signal alerts (REAL-TIME - most timely)
     elif args.signals_buy:
         send_daily_signals(signal_type="buy", limit=args.limit)
