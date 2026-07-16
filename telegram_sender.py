@@ -467,6 +467,11 @@ def get_signals_with_backtest_validation(signal_type="buy", limit=10):
     Get today's signals combined with backtest validation.
     Only returns signals for stocks with positive backtest performance.
     
+    Ranks by composite score that weighs:
+    - Signal strength (30%): Current technical signal quality
+    - Sharpe ratio (50%): Risk-adjusted historical returns  
+    - Backtest return (20%): Absolute profit potential
+    
     Args:
         signal_type: "buy" or "sell"
         limit: Number of results to return
@@ -511,6 +516,32 @@ def get_signals_with_backtest_validation(signal_type="buy", limit=10):
         on='ticker',
         how='inner'  # Only keep signals with positive backtest
     )
+    
+    # Calculate composite score to rank by best opportunities
+    # Normalize each metric to 0-1 range, then weight them
+    
+    # Normalize signal_score (0-4 range -> 0-1)
+    result['signal_score_norm'] = result['signal_score'] / 4.0
+    
+    # Normalize Sharpe ratio (scale to reasonable range, e.g., 0-2 -> 0-1)
+    max_sharpe = result['backtest_sharpe'].max()
+    result['sharpe_norm'] = result['backtest_sharpe'] / max(max_sharpe, 2.0)
+    result['sharpe_norm'] = result['sharpe_norm'].clip(0, 1)
+    
+    # Normalize return (scale to reasonable range, e.g., 0-50% -> 0-1)
+    max_return = result['backtest_return'].max()
+    result['return_norm'] = result['backtest_return'] / max(max_return, 10.0)
+    result['return_norm'] = result['return_norm'].clip(0, 1)
+    
+    # Composite score: Signal (30%) + Sharpe (50%) + Return (20%)
+    result['composite_score'] = (
+        result['signal_score_norm'] * 0.3 +
+        result['sharpe_norm'] * 0.5 +
+        result['return_norm'] * 0.2
+    )
+    
+    # Sort by composite score (best opportunities first)
+    result = result.sort_values('composite_score', ascending=False)
     
     return result.head(limit)
 
