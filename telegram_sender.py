@@ -28,6 +28,86 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # =========================================================
+# DEBUG FUNCTIONS
+# =========================================================
+
+def debug_signals_data():
+    """
+    Debug function to inspect the raw signal data and merged result.
+    Shows column names and first few rows to identify data issues.
+    """
+    print("=" * 80)
+    print("DEBUG: Inspecting raw signal data...")
+    print("=" * 80)
+    
+    signals_df = get_daily_signals(signal_type="buy", limit=10)
+    print(f"\n📊 Raw signals DataFrame (first stage):")
+    print(f"   Columns: {signals_df.columns.tolist()}")
+    print(f"   Shape: {signals_df.shape}")
+    if not signals_df.empty:
+        print(f"\n   First row:")
+        for col in signals_df.columns:
+            print(f"     {col}: {signals_df.iloc[0][col]}")
+    
+    print("\n" + "=" * 80)
+    print("DEBUG: Inspecting merged data with backtest validation...")
+    print("=" * 80)
+    
+    merged_df = get_signals_with_backtest_validation(signal_type="buy", limit=10)
+    print(f"\n📊 Merged DataFrame (after backtest join):")
+    print(f"   Columns: {merged_df.columns.tolist()}")
+    print(f"   Shape: {merged_df.shape}")
+    if not merged_df.empty:
+        print(f"\n   First row:")
+        for col in merged_df.columns:
+            print(f"     {col}: {merged_df.iloc[0][col]}")
+        
+        print(f"\n   Ticker values in merged data:")
+        print(f"     {merged_df['ticker'].tolist()}")
+    
+    print("\n" + "=" * 80)
+
+def debug_backtest_data():
+    """
+    Debug function to inspect backtest database data.
+    Shows what's available in the backtest_results table.
+    """
+    print("=" * 80)
+    print("DEBUG: Inspecting backtest database...")
+    print("=" * 80)
+    
+    conn = duckdb.connect(str(DB_PATH), read_only=True)
+    
+    try:
+        # Check if table exists
+        tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema='memory'"
+        tables_result = conn.execute(tables_query).fetchall()
+        print(f"\nAvailable tables: {tables_result}")
+        
+        # Sample backtest data
+        sample_query = """
+        SELECT 
+            ticker,
+            strategy_name,
+            total_return,
+            sharpe_ratio
+        FROM backtest_results
+        LIMIT 5
+        """
+        sample_df = conn.execute(sample_query).df()
+        print(f"\n📊 Sample backtest_results:")
+        print(sample_df)
+        
+        print(f"\nUnique tickers in backtest: {sample_df['ticker'].unique()}")
+        
+    except Exception as e:
+        print(f"❌ Error querying backtest database: {e}")
+    finally:
+        conn.close()
+    
+    print("\n" + "=" * 80)
+
+# =========================================================
 # QUERY FUNCTIONS
 # =========================================================
 
@@ -885,14 +965,23 @@ Examples:
     parser.add_argument("--sell", action="store_true", help="Send standard sell opportunities")
     parser.add_argument("--summary", action="store_true", help="Send strategy summary")
     
+    # Debug options
+    parser.add_argument("--debug-signals", action="store_true", help="Debug: Inspect raw signal data and merged results")
+    parser.add_argument("--debug-backtest", action="store_true", help="Debug: Inspect backtest database contents")
+    
     # General options
     parser.add_argument("--all", action="store_true", help="Send all alerts (signals + walk-forward + standard)")
     parser.add_argument("--limit", type=int, default=5, help="Number of results to send (default: 5)")
     
     args = parser.parse_args()
     
+    # Debug commands (first priority)
+    if args.debug_signals:
+        debug_signals_data()
+    elif args.debug_backtest:
+        debug_backtest_data()
     # Daily signal alerts (REAL-TIME - most timely)
-    if args.signals_buy:
+    elif args.signals_buy:
         send_daily_signals(signal_type="buy", limit=args.limit)
     elif args.signals_sell:
         send_daily_signals(signal_type="sell", limit=args.limit)
