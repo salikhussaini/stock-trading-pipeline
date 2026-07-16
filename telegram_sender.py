@@ -221,6 +221,13 @@ def debug_merge_step_by_step():
     print(f"   Final rows: {len(final)}")
     print(f"   Final tickers: {final['ticker'].tolist()}")
     
+    # Step 6: Check signal scores
+    print("\n🔍 Step 6: Check signal_score distribution in signals (before merge)")
+    signals_scores = signals_df[['ticker', 'signal_score', 'final_signal']].copy()
+    signals_scores = signals_scores.sort_values('signal_score', ascending=False)
+    print(f"   Top 15 rows by signal_score:")
+    print(signals_scores.head(15).to_string())
+    
     print("\n" + "=" * 80)
 
 def debug_signals_file():
