@@ -852,12 +852,16 @@ def format_daily_signals_alert(df: pd.DataFrame) -> str:
         message += "No signals generated yet\\. Run: `python signal_engine.py`\n"
         return message
     
-    # Sort by group consensus count (DESC) then signal_score (DESC)
-    # Higher group count = stronger cross-strategy agreement = better signal
+    # Sort by signal strength (DESC) → group consensus (DESC) → backtest Sharpe (DESC) → backtest return (DESC)
+    # Priority: Signal strength > Multi-strategy agreement > Risk-adjusted returns > Profit potential
     df = df.copy()
     group_cols = ['grp_trend', 'grp_momentum', 'grp_mean_reversion', 'grp_breakout', 'grp_oscillator']
     df['group_count'] = (df[[c for c in group_cols if c in df.columns]] > 0.3).sum(axis=1)
-    df = df.sort_values(['group_count', 'signal_score'], ascending=[False, False])
+    
+    # Sort by: signal score (DESC) → group consensus (DESC) → sharpe ratio (DESC) → backtest return (DESC)
+    sort_cols = ['signal_score', 'group_count', 'backtest_sharpe', 'backtest_return']
+    sort_ascending = [False, False, False, False]
+    df = df.sort_values(sort_cols, ascending=sort_ascending)
     
     message += f"*{len(df)} signals with backtest validation* \\(sorted by consensus\\):\n\n"
     
