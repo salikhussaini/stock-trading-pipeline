@@ -40,7 +40,7 @@ def debug_signals_data():
     print("DEBUG: Inspecting raw signal data...")
     print("=" * 80)
     
-    signals_df = get_daily_signals(signal_type="buy", limit=10)
+    signals_df = get_daily_signals(signal_type="buy", limit=15)
     print(f"\n📊 Raw signals DataFrame (first stage):")
     print(f"   Columns: {signals_df.columns.tolist()}")
     print(f"   Shape: {signals_df.shape}")
@@ -53,7 +53,7 @@ def debug_signals_data():
     print("DEBUG: Inspecting merged data with backtest validation...")
     print("=" * 80)
     
-    merged_df = get_signals_with_backtest_validation(signal_type="buy", limit=10)
+    merged_df = get_signals_with_backtest_validation(signal_type="buy", limit=15)
     print(f"\n📊 Merged DataFrame (after backtest join):")
     print(f"   Columns: {merged_df.columns.tolist()}")
     print(f"   Shape: {merged_df.shape}")
@@ -424,7 +424,7 @@ def get_strategy_summary():
 # DAILY SIGNAL QUERY FUNCTIONS
 # =========================================================
 
-def get_daily_signals(signal_type="buy", limit=10):
+def get_daily_signals(signal_type="buy", limit=15):
     """
     Get today's trading signals from signal_engine.
     Returns ONE signal per ticker (the strongest one) to ensure diversity.
@@ -465,7 +465,7 @@ def get_daily_signals(signal_type="buy", limit=10):
         return df
     return df.head(limit)
 
-def get_signals_with_backtest_validation(signal_type="buy", limit=10):
+def get_signals_with_backtest_validation(signal_type="buy", limit=15):
     """
     Get today's signals combined with backtest validation.
     Only returns signals for stocks with positive backtest performance.
@@ -887,7 +887,7 @@ def format_daily_signals_alert(df: pd.DataFrame) -> str:
         if row.get('grp_oscillator', 0) > 0.3:     strategies.append("Oscillator")
 
         if strategies:
-            message += f"  Confirming groups: {escape_markdown(', '.join(strategies))}\n"
+            message += f"  Groups: {escape_markdown(', '.join(strategies))}\n"
         
         message += "\n"
     
@@ -1141,7 +1141,7 @@ def send_comparison_alert(limit=5):
     message = format_comparison_alert(wf_df, std_df)
     send_telegram_message(message)
 
-def send_daily_signals(signal_type="buy", limit=10):
+def send_daily_signals(signal_type="buy", limit=15):
     """Send today's trading signals to Telegram."""
     signal_label = "buy" if signal_type == "buy" else "sell"
     print(f"🔍 Querying today's {signal_label} signals with backtest validation...")
@@ -1290,7 +1290,7 @@ Examples:
     # Send all alerts
     elif args.all:
         print("📤 Sending comprehensive alert package...\n")
-        send_daily_signals(signal_type="buy", limit=10)
+        send_daily_signals(signal_type="buy", limit=15)
         print()
         send_signal_summary()
         print()
@@ -1301,4 +1301,4 @@ Examples:
     # Default: daily buy signals (real-time + backtest validated)
     else:
         print("💡 No option specified. Sending today's buy signals (use --help for options)\n")
-        send_daily_signals(signal_type="buy", limit=10)
+        send_daily_signals(signal_type="buy", limit=15)
