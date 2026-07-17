@@ -852,7 +852,14 @@ def format_daily_signals_alert(df: pd.DataFrame) -> str:
         message += "No signals generated yet\\. Run: `python signal_engine.py`\n"
         return message
     
-    message += f"*{len(df)} signals with backtest validation:*\n\n"
+    # Sort by group consensus count (DESC) then signal_score (DESC)
+    # Higher group count = stronger cross-strategy agreement = better signal
+    df = df.copy()
+    group_cols = ['grp_trend', 'grp_momentum', 'grp_mean_reversion', 'grp_breakout', 'grp_oscillator']
+    df['group_count'] = (df[[c for c in group_cols if c in df.columns]] > 0.3).sum(axis=1)
+    df = df.sort_values(['group_count', 'signal_score'], ascending=[False, False])
+    
+    message += f"*{len(df)} signals with backtest validation* \\(sorted by consensus\\):\n\n"
     
     for idx, row in df.iterrows():
         ticker = escape_markdown(str(row['ticker']))
@@ -862,8 +869,9 @@ def format_daily_signals_alert(df: pd.DataFrame) -> str:
         quality = row.get('signal_quality', '')
         signal_rank = row.get('signal_rank', 0)
         score_pct = abs(row['signal_score']) / 4.0 * 100
+        group_count = int(row.get('group_count', 0))
 
-        message += f"{signal_type} *{ticker}* \\[Grade *{quality}*\\]\n"
+        message += f"{signal_type} *{ticker}* \\[Grade *{quality}* \\| *{group_count}*/5 groups\\]\n"
         message += f"  Score: {row['signal_score']:+.2f}/4 \\({score_pct:.0f}%\\) \\| Rank: {signal_rank:.0f}th pct\n"
         message += f"  Best Strategy: {best_strat}\n"
 
