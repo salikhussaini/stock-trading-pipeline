@@ -595,47 +595,110 @@ def generate_signals(force=False):
             signals.append(strategy(group.reset_index(drop=True)))
         df[name] = np.concatenate(signals)
     
-    # Ensemble voting: sum all strategy scores
-    # Range: -15 to +15 (15 strategies with confidence levels 0.25/0.5/0.75/1.0)
-    strategy_cols = list(strategies.keys())
-    df["signal_score_raw"] = df[strategy_cols].sum(axis=1)
-    
-    # Scale to 0-4 range for display consistency
-    # Preserves differentiation: raw 15 → 4.0, raw 10 → 2.67, raw 5 → 1.33
-    df["signal_score"] = (df["signal_score_raw"] / 15.0 * 4.0).clip(-4, 4)
-    
-    # Final signal: requires consensus (1.5+ on 0-4 scale = ~5.6 raw = 37% of strategies)
-    # Lower threshold to ensure we capture signals, composite scoring handles quality filtering
+    # ── Group strategies to remove inter-strategy correlation bias ──────────────
+    # Correlated strategies (e.g. trend_following + macd_crossover both use MACD/SMA)
+    # are averaged within their group before being combined, so a cluster of similar
+    # signals doesn't artificially inflate the composite score.
+    strategy_groups = {
+        "trend":          ["trend_following", "macd_crossover"],
+        "mean_reversion": ["mean_reversion", "rsi_extremes", "rsi_divergence"],
+        "momentum":       ["momentum_strategy", "volume_analysis", "volume_trend"],
+        "breakout":       ["breakout_strategy", "bb_squeeze_breakout"],
+        "oscillator":     ["stochastic_oscillator", "volatility_contraction"],
+        "misc":           ["adx_strength_only", "price_action", "return_magnitude"],
+    }
+
+    # Group weights (sum to 1.0) — trend & momentum carry higher predictive weight
+    GROUP_WEIGHTS = {
+        "trend":          0.25,
+        "mean_reversion": 0.20,
+        "momentum":       0.20,
+        "breakout":       0.15,
+        "oscillator":     0.10,
+        "misc":           0.10,
+    }
+
+    # Step 1: average within each group (-1 to +1 per group)
+    for group, strats in strategy_groups.items():
+        df[f"grp_{group}"] = df[strats].mean(axis=1)
+
+    # Step 2: weighted composite raw score (-1 to +1)
+    df["signal_score_raw"] = sum(
+        df[f"grp_{g}"] * w for g, w in GROUP_WEIGHTS.items()
+    )
+
+    # Step 3: scale to -4 to +4 for display consistency
+    df["signal_score"] = (df["signal_score_raw"] * 4.0).clip(-4, 4).round(3)
+
+    # Step 4: cross-sectional percentile rank (0 = weakest, 100 = strongest)
+    df["signal_rank"] = df["signal_score_raw"].rank(pct=True).mul(100).round(1)
+
+    # Step 5: final directional signal — raw threshold ≥ 0.375 → score ≥ 1.5
     df["final_signal"] = 0
     df.loc[df["signal_score"] >= 1.5, "final_signal"] = 1
     df.loc[df["signal_score"] <= -1.5, "final_signal"] = -1
-    
+
+    # Step 6: quality tier based on cross-sectional percentile rank
+    #   Buy  A → top 10%  (rank ≥ 90)   — high-conviction long
+    #   Buy  B → top 25%  (rank ≥ 75)   — moderate long
+    #   Buy  C → passed threshold only   — weak long
+    #   Sell A → bottom 10% (rank ≤ 10) — high-conviction short
+    #   Sell B → bottom 25% (rank ≤ 25) — moderate short
+    #   Sell C → passed threshold only   — weak short
+    df["signal_quality"] = np.select(
+        [
+            df["final_signal"].eq(1)  & df["signal_rank"].ge(90),
+            df["final_signal"].eq(1)  & df["signal_rank"].ge(75),
+            df["final_signal"].eq(1),
+            df["final_signal"].eq(-1) & df["signal_rank"].le(10),
+            df["final_signal"].eq(-1) & df["signal_rank"].le(25),
+            df["final_signal"].eq(-1),
+        ],
+        ["A", "B", "C", "A", "B", "C"],
+        default="",
+    )
+
     df["signal_date"] = today
     
-    print("\n📊 Signal Score Statistics (ALL signals):")
-    print(f"   Mean: {df['signal_score'].mean():.2f}/4")
-    print(f"   Min: {df['signal_score'].min():.2f}, Max: {df['signal_score'].max():.2f}")
-    print(f"   Median: {df['signal_score'].median():.2f}/4")
-    print(f"   Scores >= 2.0: {len(df[df['signal_score'] >= 2.0]):,}")
-    print(f"   Scores >= 1.5: {len(df[df['signal_score'] >= 1.5]):,}")
-    print(f"   Scores >= 1.0: {len(df[df['signal_score'] >= 1.0]):,}")
-    
+    print("\n📊 Group Scores (cross-strategy averages):")
+    for group, w in GROUP_WEIGHTS.items():
+        col = f"grp_{group}"
+        print(f"   {group:<16}  weight={w:.2f}  mean={df[col].mean():+.3f}  "
+              f"max={df[col].max():+.3f}  min={df[col].min():+.3f}")
+
+    print("\n📊 Composite Score Statistics (all tickers):")
+    print(f"   Mean: {df['signal_score'].mean():+.3f}/4  "
+          f"Median: {df['signal_score'].median():+.3f}/4  "
+          f"Std: {df['signal_score'].std():.3f}")
+    print(f"   Min: {df['signal_score'].min():+.3f}   Max: {df['signal_score'].max():+.3f}")
+    print(f"   Scores ≥ 2.0: {(df['signal_score'] >= 2.0).sum():,}  "
+          f"≥ 1.5: {(df['signal_score'] >= 1.5).sum():,}  "
+          f"≥ 1.0: {(df['signal_score'] >= 1.0).sum():,}")
+
     print("\n📊 Signal Distribution:")
-    print(f"   Buy signals (final_signal=1): {len(df[df['final_signal'] == 1])}")
-    print(f"   Sell signals (final_signal=-1): {len(df[df['final_signal'] == -1])}")
-    print(f"   Neutral: {len(df[df['final_signal'] == 0])}")
-    
-    print(f"\n📊 Signal Score Distribution (Buy signals only):")
-    buy_signals = df[df["final_signal"] == 1]["signal_score"]
-    if len(buy_signals) > 0:
-        print(f"   Mean: {buy_signals.mean():.2f}/4")
-        print(f"   Min: {buy_signals.min():.2f}, Max: {buy_signals.max():.2f}")
-        print(f"   Median: {buy_signals.median():.2f}/4")
-        print(f"   Score distribution:")
-        for score in sorted(buy_signals.unique(), reverse=True):
-            count = len(buy_signals[buy_signals == score])
-            pct = (count / len(buy_signals)) * 100
-            print(f"      {score:+.1f}/4: {count:3d} signals ({pct:5.1f}%)")
+    buy_df  = df[df["final_signal"] == 1]
+    sell_df = df[df["final_signal"] == -1]
+    print(f"   Buy  signals: {len(buy_df):,}   "
+          f"Sell signals: {len(sell_df):,}   "
+          f"Neutral: {(df['final_signal'] == 0).sum():,}")
+
+    if len(buy_df) > 0:
+        print(f"\n📊 Buy Signal Quality Breakdown:")
+        for tier in ["A", "B", "C"]:
+            sub = buy_df[buy_df["signal_quality"] == tier]
+            if len(sub):
+                print(f"   Grade {tier}: {len(sub):3d}  "
+                      f"score {sub['signal_score'].min():+.2f}–{sub['signal_score'].max():+.2f}  "
+                      f"rank {sub['signal_rank'].min():.0f}th–{sub['signal_rank'].max():.0f}th pct")
+
+    if len(sell_df) > 0:
+        print(f"\n📊 Sell Signal Quality Breakdown:")
+        for tier in ["A", "B", "C"]:
+            sub = sell_df[sell_df["signal_quality"] == tier]
+            if len(sub):
+                print(f"   Grade {tier}: {len(sub):3d}  "
+                      f"score {sub['signal_score'].min():+.2f}–{sub['signal_score'].max():+.2f}  "
+                      f"rank {sub['signal_rank'].min():.0f}th–{sub['signal_rank'].max():.0f}th pct")
     
     print("\nSaving signals...")
     duckdb.from_df(df).write_parquet(str(SIGNAL_PATH))
