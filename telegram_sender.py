@@ -1156,9 +1156,23 @@ def send_daily_signals(signal_type="buy", limit=15):
         print(f"No {signal_label} signals found.")
         return
     
-    print(f"Found {len(df)} signals")
+    # Calculate group consensus (needed for high-conviction filtering)
+    group_cols = ['grp_trend', 'grp_momentum', 'grp_mean_reversion', 'grp_breakout', 'grp_oscillator']
+    df['group_count'] = (df[[c for c in group_cols if c in df.columns]] > 0.3).sum(axis=1)
     
-    message = format_daily_signals_alert(df)
+    # Apply high-conviction filter: Grade A signals with 3+ group consensus
+    df_filtered = df[(df['signal_quality'] == 'A') & (df['group_count'] >= 3)]
+    
+    print(f"Found {len(df)} signals, {len(df_filtered)} meet high-conviction criteria (Grade A + 3+ groups)")
+    
+    if df_filtered.empty:
+        print(f"No high-conviction {signal_label} signals. Showing all Grade A signals instead...")
+        df_filtered = df[df['signal_quality'] == 'A']
+        if df_filtered.empty:
+            print(f"No Grade A {signal_label} signals available.")
+            return
+    
+    message = format_daily_signals_alert(df_filtered)
     send_telegram_message(message)
 
 def send_signal_summary():
