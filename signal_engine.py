@@ -603,7 +603,7 @@ def generate_signals(force=False):
         "trend":          ["trend_following", "macd_crossover"],
         "mean_reversion": ["mean_reversion", "rsi_extremes", "rsi_divergence"],
         "momentum":       ["momentum", "volume_analysis", "volume_trend"],
-        "breakout":       ["breakout_strategy", "bb_squeeze_breakout"],
+        "breakout":       ["breakout", "bb_squeeze_breakout"],
         "oscillator":     ["stochastic_oscillator", "volatility_contraction"],
         "misc":           ["adx_strength_only", "price_action", "return_magnitude"],
     }
