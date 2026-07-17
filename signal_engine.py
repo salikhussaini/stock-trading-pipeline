@@ -627,36 +627,46 @@ def generate_signals(force=False):
         df[f"grp_{g}"] * w for g, w in GROUP_WEIGHTS.items()
     )
 
-    # Step 3: scale to -4 to +4 for display consistency
-    df["signal_score"] = (df["signal_score_raw"] * 4.0).clip(-4, 4).round(3)
+    # Step 3: normalize to -4 to +4 using the empirical max so the full scale is used.
+    # Group averaging shrinks the effective range below ±1, so a raw ÷ empirical_max
+    # rescaling ensures the best/worst ticker always maps to ±4 rather than ±1.9.
+    raw_abs_max = df["signal_score_raw"].abs().max()
+    if raw_abs_max > 0:
+        df["signal_score"] = (df["signal_score_raw"] / raw_abs_max * 4.0).clip(-4, 4).round(3)
+    else:
+        df["signal_score"] = 0.0
 
-    # Step 4: cross-sectional percentile rank (0 = weakest, 100 = strongest)
+    # Step 4: cross-sectional percentile rank across all rows (0 = weakest, 100 = best)
     df["signal_rank"] = df["signal_score_raw"].rank(pct=True).mul(100).round(1)
 
-    # Step 5: final directional signal — raw threshold ≥ 0.375 → score ≥ 1.5
+    # Step 5: final directional signal
+    # Threshold = 75th pct of the normalized scale (score ≥ 3.0 / 4.0 = top 25% of range)
+    THRESHOLD = 3.0
     df["final_signal"] = 0
-    df.loc[df["signal_score"] >= 1.5, "final_signal"] = 1
-    df.loc[df["signal_score"] <= -1.5, "final_signal"] = -1
+    df.loc[df["signal_score"] >= THRESHOLD,  "final_signal"] = 1
+    df.loc[df["signal_score"] <= -THRESHOLD, "final_signal"] = -1
 
-    # Step 6: quality tier based on cross-sectional percentile rank
-    #   Buy  A → top 10%  (rank ≥ 90)   — high-conviction long
-    #   Buy  B → top 25%  (rank ≥ 75)   — moderate long
-    #   Buy  C → passed threshold only   — weak long
-    #   Sell A → bottom 10% (rank ≤ 10) — high-conviction short
-    #   Sell B → bottom 25% (rank ≤ 25) — moderate short
-    #   Sell C → passed threshold only   — weak short
-    df["signal_quality"] = np.select(
-        [
-            df["final_signal"].eq(1)  & df["signal_rank"].ge(90),
-            df["final_signal"].eq(1)  & df["signal_rank"].ge(75),
-            df["final_signal"].eq(1),
-            df["final_signal"].eq(-1) & df["signal_rank"].le(10),
-            df["final_signal"].eq(-1) & df["signal_rank"].le(25),
-            df["final_signal"].eq(-1),
-        ],
-        ["A", "B", "C", "A", "B", "C"],
-        default="",
-    )
+    # Step 6: quality tier — ranked *within* the buy / sell population, not cross-sectionally.
+    # This ensures A/B/C always meaningfully differentiates strong vs weak signals.
+    #   A → top    33% of buy signals   (or bottom 33% of sell signals by score)
+    #   B → middle 33%
+    #   C → bottom 33% of buy signals   (or top 33% of sell signals — weakest)
+    df["signal_quality"] = ""
+    buy_mask  = df["final_signal"] == 1
+    sell_mask = df["final_signal"] == -1
+
+    if buy_mask.any():
+        buy_pct = df.loc[buy_mask, "signal_score_raw"].rank(pct=True)
+        df.loc[buy_mask & (buy_pct >= 2/3), "signal_quality"] = "A"
+        df.loc[buy_mask & (buy_pct >= 1/3) & (buy_pct < 2/3), "signal_quality"] = "B"
+        df.loc[buy_mask & (buy_pct < 1/3),  "signal_quality"] = "C"
+
+    if sell_mask.any():
+        sell_pct = df.loc[sell_mask, "signal_score_raw"].rank(pct=True)
+        # For sells: lower score (more negative) = stronger conviction → A
+        df.loc[sell_mask & (sell_pct <= 1/3), "signal_quality"] = "A"
+        df.loc[sell_mask & (sell_pct > 1/3) & (sell_pct <= 2/3), "signal_quality"] = "B"
+        df.loc[sell_mask & (sell_pct > 2/3), "signal_quality"] = "C"
 
     df["signal_date"] = today
     
@@ -666,14 +676,15 @@ def generate_signals(force=False):
         print(f"   {group:<16}  weight={w:.2f}  mean={df[col].mean():+.3f}  "
               f"max={df[col].max():+.3f}  min={df[col].min():+.3f}")
 
-    print("\n📊 Composite Score Statistics (all tickers):")
+    print(f"\n📊 Composite Score Statistics (all tickers, normalized to ±4):")
+    print(f"   Empirical raw max: {raw_abs_max:.4f}  (theoretical max limited by group averaging)")
     print(f"   Mean: {df['signal_score'].mean():+.3f}/4  "
           f"Median: {df['signal_score'].median():+.3f}/4  "
           f"Std: {df['signal_score'].std():.3f}")
     print(f"   Min: {df['signal_score'].min():+.3f}   Max: {df['signal_score'].max():+.3f}")
-    print(f"   Scores ≥ 2.0: {(df['signal_score'] >= 2.0).sum():,}  "
-          f"≥ 1.5: {(df['signal_score'] >= 1.5).sum():,}  "
-          f"≥ 1.0: {(df['signal_score'] >= 1.0).sum():,}")
+    print(f"   Signal threshold: ±{THRESHOLD:.1f}/4  "
+          f"(≥{THRESHOLD}: {(df['signal_score'] >= THRESHOLD).sum():,}  "
+          f"≤-{THRESHOLD}: {(df['signal_score'] <= -THRESHOLD).sum():,})")
 
     print("\n📊 Signal Distribution:")
     buy_df  = df[df["final_signal"] == 1]
