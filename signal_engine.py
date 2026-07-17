@@ -698,18 +698,20 @@ def generate_signals(force=False):
         for tier in ["A", "B", "C"]:
             sub = buy_df[buy_df["signal_quality"] == tier]
             if len(sub):
-                print(f"   Grade {tier}: {len(sub):3d}  "
-                      f"score {sub['signal_score'].min():+.2f}–{sub['signal_score'].max():+.2f}  "
-                      f"rank {sub['signal_rank'].min():.0f}th–{sub['signal_rank'].max():.0f}th pct")
+                pct_of_buys = len(sub) / len(buy_df) * 100
+                print(f"   Grade {tier}: {len(sub):5,d} ({pct_of_buys:4.1f}%)  "
+                      f"score {sub['signal_score'].min():+.2f} – {sub['signal_score'].max():+.2f}  "
+                      f"median {sub['signal_score'].median():+.2f}")
 
     if len(sell_df) > 0:
         print(f"\n📊 Sell Signal Quality Breakdown:")
         for tier in ["A", "B", "C"]:
             sub = sell_df[sell_df["signal_quality"] == tier]
             if len(sub):
-                print(f"   Grade {tier}: {len(sub):3d}  "
-                      f"score {sub['signal_score'].min():+.2f}–{sub['signal_score'].max():+.2f}  "
-                      f"rank {sub['signal_rank'].min():.0f}th–{sub['signal_rank'].max():.0f}th pct")
+                pct_of_sells = len(sub) / len(sell_df) * 100
+                print(f"   Grade {tier}: {len(sub):5,d} ({pct_of_sells:4.1f}%)  "
+                      f"score {sub['signal_score'].min():+.2f} – {sub['signal_score'].max():+.2f}  "
+                      f"median {sub['signal_score'].median():+.2f}")
     
     print("\nSaving signals...")
     duckdb.from_df(df).write_parquet(str(SIGNAL_PATH))
