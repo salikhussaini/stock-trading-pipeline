@@ -524,25 +524,31 @@ def get_signals_with_backtest_validation(signal_type="buy", limit=10):
     
     # Calculate composite score to rank by best opportunities
     # Normalize each metric to 0-1 range, then weight them
-    
-    # Normalize signal_score (0-4 range -> 0-1)
-    result['signal_score_norm'] = result['signal_score'] / 4.0
-    
-    # Normalize Sharpe ratio (scale to reasonable range, e.g., 0-2 -> 0-1)
+
+    # signal_score is now normalized to -4 to +4; actionable buy/sell signals are
+    # in the 3.0–4.0 / -4.0–-3.0 range.  Map that window to 0–1.
+    result['signal_score_norm'] = ((result['signal_score'].abs() - 3.0) / 1.0).clip(0, 1)
+
+    # signal_quality (A/B/C) encodes within-signal conviction tier — use it as a bonus.
+    quality_map = {"A": 1.0, "B": 0.67, "C": 0.33}
+    result['quality_bonus'] = result['signal_quality'].map(quality_map).fillna(0.33)
+
+    # Normalize Sharpe ratio (0-2 → 0-1)
     max_sharpe = result['backtest_sharpe'].max()
     result['sharpe_norm'] = result['backtest_sharpe'] / max(max_sharpe, 2.0)
     result['sharpe_norm'] = result['sharpe_norm'].clip(0, 1)
-    
-    # Normalize return (scale to reasonable range, e.g., 0-50% -> 0-1)
+
+    # Normalize return (0-50% → 0-1)
     max_return = result['backtest_return'].max()
     result['return_norm'] = result['backtest_return'] / max(max_return, 10.0)
     result['return_norm'] = result['return_norm'].clip(0, 1)
-    
-    # Composite score: Signal (30%) + Sharpe (50%) + Return (20%)
+
+    # Composite score: Quality tier (20%) + Signal strength (10%) + Sharpe (50%) + Return (20%)
     result['composite_score'] = (
-        result['signal_score_norm'] * 0.3 +
-        result['sharpe_norm'] * 0.5 +
-        result['return_norm'] * 0.2
+        result['quality_bonus']      * 0.20 +
+        result['signal_score_norm']  * 0.10 +
+        result['sharpe_norm']        * 0.50 +
+        result['return_norm']        * 0.20
     )
     
     # Sort by composite score (best opportunities first)
@@ -563,15 +569,26 @@ def get_signal_summary():
     sell_count = len(signals_df[signals_df['final_signal'] == -1])
     neutral_count = len(signals_df[signals_df['final_signal'] == 0])
     
-    # Strategy breakdown
-    strategy_signals = signals_df[['trend_following', 'momentum', 'mean_reversion', 'breakout']].sum()
-    
+    # Group-level breakdown: count tickers where each group has a net bullish vote
+    group_cols = {
+        'grp_trend':          'Trend',
+        'grp_momentum':       'Momentum',
+        'grp_mean_reversion': 'Mean Reversion',
+        'grp_breakout':       'Breakout',
+        'grp_oscillator':     'Oscillator',
+    }
+    strategy_signals = {
+        label: int((signals_df[col] > 0).sum())
+        for col, label in group_cols.items()
+        if col in signals_df.columns
+    }
+
     return {
         'buy': buy_count,
         'sell': sell_count,
         'neutral': neutral_count,
         'total': len(signals_df),
-        'strategies': strategy_signals.to_dict()
+        'strategies': strategy_signals
     }
 
 # =========================================================
@@ -842,26 +859,27 @@ def format_daily_signals_alert(df: pd.DataFrame) -> str:
         best_strat = escape_markdown(str(row.get('best_strategy', 'N/A')))
         signal_type = "🟢 BUY" if row['final_signal'] == 1 else "🔴 SELL"
         
-        message += f"{signal_type} *{ticker}*\n"
-        message += f"  Signal Score: {row['signal_score']}/4 \\| Consensus: {row['signal_score']*25}%\n"
+        quality = row.get('signal_quality', '')
+        signal_rank = row.get('signal_rank', 0)
+        score_pct = abs(row['signal_score']) / 4.0 * 100
+
+        message += f"{signal_type} *{ticker}* \\[Grade *{quality}*\\]\n"
+        message += f"  Score: {row['signal_score']:+.2f}/4 \\({score_pct:.0f}%\\) \\| Rank: {signal_rank:.0f}th pct\n"
         message += f"  Best Strategy: {best_strat}\n"
-        
+
         if 'backtest_return' in row:
             message += f"  Backtest Return: {row['backtest_return']}% \\| Sharpe: {row['backtest_sharpe']}\n"
-        
-        # Individual strategy signals
+
+        # Bullish group signals (group score > 0.3 = meaningful contribution)
         strategies = []
-        if row.get('trend_following') == 1:
-            strategies.append("Trend")
-        if row.get('momentum') == 1:
-            strategies.append("Momentum")
-        if row.get('mean_reversion') == 1:
-            strategies.append("MeanRev")
-        if row.get('breakout') == 1:
-            strategies.append("Breakout")
-        
+        if row.get('grp_trend', 0) > 0.3:          strategies.append("Trend")
+        if row.get('grp_momentum', 0) > 0.3:       strategies.append("Momentum")
+        if row.get('grp_mean_reversion', 0) > 0.3: strategies.append("MeanRev")
+        if row.get('grp_breakout', 0) > 0.3:       strategies.append("Breakout")
+        if row.get('grp_oscillator', 0) > 0.3:     strategies.append("Oscillator")
+
         if strategies:
-            message += f"  Strategies: {', '.join(strategies)}\n"
+            message += f"  Confirming groups: {escape_markdown(', '.join(strategies))}\n"
         
         message += "\n"
     
