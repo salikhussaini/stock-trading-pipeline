@@ -602,7 +602,7 @@ def generate_signals(force=False):
     strategy_groups = {
         "trend":          ["trend_following", "macd_crossover"],
         "mean_reversion": ["mean_reversion", "rsi_extremes", "rsi_divergence"],
-        "momentum":       ["momentum_strategy", "volume_analysis", "volume_trend"],
+        "momentum":       ["momentum", "volume_analysis", "volume_trend"],
         "breakout":       ["breakout_strategy", "bb_squeeze_breakout"],
         "oscillator":     ["stochastic_oscillator", "volatility_contraction"],
         "misc":           ["adx_strength_only", "price_action", "return_magnitude"],
