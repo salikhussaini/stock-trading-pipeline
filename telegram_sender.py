@@ -1160,10 +1160,17 @@ def send_daily_signals(signal_type="buy", limit=15):
     group_cols = ['grp_trend', 'grp_momentum', 'grp_mean_reversion', 'grp_breakout', 'grp_oscillator']
     df['group_count'] = (df[[c for c in group_cols if c in df.columns]] > 0.3).sum(axis=1)
     
-    # Apply high-conviction filter: Grade A signals with 3+ group consensus
-    df_filtered = df[(df['signal_quality'] == 'A') & (df['group_count'] >= 3)]
+    # Apply high-conviction filter: different thresholds for buy vs sell
+    # Buy: Grade A + 3+/5 groups (strict)
+    # Sell: Grade A + 2+/5 groups (more inclusive)
+    if signal_type == "buy":
+        df_filtered = df[(df['signal_quality'] == 'A') & (df['group_count'] >= 3)]
+        criteria = "Grade A + 3+ groups"
+    else:  # sell
+        df_filtered = df[(df['signal_quality'] == 'A') & (df['group_count'] >= 2)]
+        criteria = "Grade A + 2+ groups"
     
-    print(f"Found {len(df)} signals, {len(df_filtered)} meet high-conviction criteria (Grade A + 3+ groups)")
+    print(f"Found {len(df)} signals, {len(df_filtered)} meet high-conviction criteria ({criteria})")
     
     if df_filtered.empty:
         print(f"No high-conviction {signal_label} signals. Showing all Grade A signals instead...")
