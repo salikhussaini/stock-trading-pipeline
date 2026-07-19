@@ -139,6 +139,9 @@ def refresh_session_if_needed():
 # TABLE INIT (main connection only)
 # =========================================================
 
+# Ensure database directory exists
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 main_conn = duckdb.connect(str(DB_PATH))
 
 main_conn.execute("""
