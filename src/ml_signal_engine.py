@@ -298,6 +298,7 @@ def generate_ml_signals(validate_features_flag=True):
     log_info(f"Training models and generating signals...")
     
     all_signals = []
+    all_performance = []
     successful_tickers = []
     failed_tickers = []
     
@@ -308,10 +309,13 @@ def generate_ml_signals(validate_features_flag=True):
         
         log_info(f"  [{i}/{n_tickers}] {ticker} ({len(ticker_df)} rows)")
         
-        result = train_and_predict_ticker(ticker_df, feature_cols, ticker)
+        result, perf = train_and_predict_ticker(ticker_df, feature_cols, ticker)
         if result is not None:
             all_signals.append(result)
+            all_performance.append(perf)
             successful_tickers.append(ticker)
+            # Log ticker-specific metrics
+            log_info(f"      Accuracy: {perf['accuracy']:.3f} | F1: {perf['f1_score']:.3f} | ROC-AUC: {perf['roc_auc']:.3f}")
         else:
             failed_tickers.append(ticker)
     
@@ -345,6 +349,33 @@ def generate_ml_signals(validate_features_flag=True):
     
     file_size_mb = SIGNALS_PATH.stat().st_size / (1024 * 1024)
     log_info(f"Signals saved: {len(df_signals):,} rows, {file_size_mb:.1f} MB in {save_time:.1f}s")
+    
+    # -------------------------
+    # SAVE MODEL PERFORMANCE METRICS TO PARQUET
+    # -------------------------
+    if all_performance:
+        log_info(f"Saving model performance metrics to {PERFORMANCE_PATH.name}...")
+        df_perf = pd.DataFrame(all_performance)
+        
+        perf_start = time.perf_counter()
+        conn = duckdb.connect()
+        conn.execute(f"COPY df_perf TO '{PERFORMANCE_PATH}' (FORMAT PARQUET, COMPRESSION 'snappy')")
+        conn.close()
+        perf_time = time.perf_counter() - perf_start
+        
+        log_info(f"Performance metrics saved in {perf_time:.1f}s")
+        
+        # Log aggregated performance stats
+        log_info("Aggregated Model Performance:")
+        log_info(f"  Accuracy:  {df_perf['accuracy'].mean():.3f} ± {df_perf['accuracy'].std():.3f}")
+        log_info(f"  Precision: {df_perf['precision'].mean():.3f} ± {df_perf['precision'].std():.3f}")
+        log_info(f"  Recall:    {df_perf['recall'].mean():.3f} ± {df_perf['recall'].std():.3f}")
+        log_info(f"  F1-Score:  {df_perf['f1_score'].mean():.3f} ± {df_perf['f1_score'].std():.3f}")
+        log_info(f"  ROC-AUC:   {df_perf['roc_auc'].mean():.3f} ± {df_perf['roc_auc'].std():.3f}")
+    
+    # -------------------------
+    # SIGNAL STATISTICS
+    # -------------------------
     
     # -------------------------
     # SIGNAL STATISTICS
@@ -422,6 +453,82 @@ def get_signal_statistics():
     conn.close()
     return result
 
+def get_model_performance():
+    """Get model performance metrics for all tickers."""
+    if not PERFORMANCE_PATH.exists():
+        log_error(f"Performance metrics file not found: {PERFORMANCE_PATH}")
+        return None
+    
+    conn = duckdb.connect()
+    df = conn.execute(f"SELECT * FROM read_parquet('{PERFORMANCE_PATH}') ORDER BY ticker").df()
+    conn.close()
+    return df
+
+def get_model_performance_by_ticker(ticker):
+    """Get performance metrics for specific ticker."""
+    if not PERFORMANCE_PATH.exists():
+        log_error(f"Performance metrics file not found: {PERFORMANCE_PATH}")
+        return None
+    
+    conn = duckdb.connect()
+    query = f"""
+        SELECT * FROM read_parquet('{PERFORMANCE_PATH}')
+        WHERE ticker = '{ticker}'
+    """
+    result = conn.execute(query).df()
+    conn.close()
+    
+    if len(result) == 0:
+        log_warning(f"No performance metrics found for {ticker}")
+        return None
+    
+    return result.iloc[0]
+
+def display_model_performance_summary():
+    """Display formatted model performance summary."""
+    df = get_model_performance()
+    if df is None or len(df) == 0:
+        print("No performance metrics available")
+        return
+    
+    print("\n" + "="*100)
+    print("MODEL PERFORMANCE SUMMARY (All Tickers)")
+    print("="*100)
+    
+    # Summary statistics
+    print("\nAGGREGATED METRICS:")
+    print(f"  Total Tickers:    {len(df)}")
+    print(f"  Accuracy:         {df['accuracy'].mean():.4f} ± {df['accuracy'].std():.4f}")
+    print(f"  Precision:        {df['precision'].mean():.4f} ± {df['precision'].std():.4f}")
+    print(f"  Recall:           {df['recall'].mean():.4f} ± {df['recall'].std():.4f}")
+    print(f"  F1-Score:         {df['f1_score'].mean():.4f} ± {df['f1_score'].std():.4f}")
+    print(f"  ROC-AUC:          {df['roc_auc'].mean():.4f} ± {df['roc_auc'].std():.4f}")
+    
+    # Top performers
+    print("\nTOP 10 PERFORMERS (by ROC-AUC):")
+    top_df = df.nlargest(10, 'roc_auc')[['ticker', 'accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'total_samples']]
+    print(top_df.to_string(index=False))
+    
+    # Bottom performers
+    print("\nBOTTOM 10 PERFORMERS (by ROC-AUC):")
+    bottom_df = df.nsmallest(10, 'roc_auc')[['ticker', 'accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'total_samples']]
+    print(bottom_df.to_string(index=False))
+    
+    # Full detailed table
+    print("\nDETAILED PERFORMANCE (All Tickers):")
+    detailed = df[[
+        'ticker', 'total_samples', 'n_folds', 'accuracy', 'precision', 
+        'recall', 'f1_score', 'roc_auc', 'bullish_signals', 'bearish_signals'
+    ]].copy()
+    detailed['accuracy'] = detailed['accuracy'].round(4)
+    detailed['precision'] = detailed['precision'].round(4)
+    detailed['recall'] = detailed['recall'].round(4)
+    detailed['f1_score'] = detailed['f1_score'].round(4)
+    detailed['roc_auc'] = detailed['roc_auc'].round(4)
+    print(detailed.to_string(index=False))
+    
+    print("="*100 + "\n")
+
 # =========================================================
 # RUN
 # =========================================================
@@ -430,8 +537,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="ML-based trading signal generation")
-    parser.add_argument("--query", type=str, choices=['latest', 'stats', 'ticker'],
-                       help="Query mode: latest signals, statistics, or signals for specific ticker")
+    parser.add_argument("--query", type=str, choices=['latest', 'stats', 'ticker', 'accuracy', 'performance'],
+                       help="Query mode: latest signals, statistics, ticker signals, model accuracy, or full performance")
     parser.add_argument("--ticker", type=str, help="Ticker symbol for query mode")
     parser.add_argument("--limit", type=int, default=20, help="Limit results (default: 20)")
     
@@ -454,6 +561,29 @@ if __name__ == "__main__":
             df = get_signals_by_ticker(args.ticker, args.limit)
             if df is not None:
                 print(df.to_string())
+        elif args.query == 'accuracy':
+            if args.ticker:
+                log_info(f"Retrieving accuracy for {args.ticker}...")
+                perf = get_model_performance_by_ticker(args.ticker)
+                if perf is not None:
+                    print(f"\nModel Accuracy for {args.ticker}:")
+                    print(f"  Accuracy:  {perf['accuracy']:.4f} (±{perf['accuracy_std']:.4f})")
+                    print(f"  Precision: {perf['precision']:.4f} (±{perf['precision_std']:.4f})")
+                    print(f"  Recall:    {perf['recall']:.4f} (±{perf['recall_std']:.4f})")
+                    print(f"  F1-Score:  {perf['f1_score']:.4f} (±{perf['f1_score_std']:.4f})")
+                    print(f"  ROC-AUC:   {perf['roc_auc']:.4f} (±{perf['roc_auc_std']:.4f})")
+                    print(f"  Total Samples: {perf['total_samples']}")
+                    print(f"  Buy Signals:   {perf['bullish_signals']}")
+                    print(f"  Sell Signals:  {perf['bearish_signals']}")
+                    print()
+            else:
+                log_info("Displaying model accuracy for all tickers...")
+                display_model_performance_summary()
+        elif args.query == 'performance':
+            log_info("Retrieving model performance metrics...")
+            df = get_model_performance()
+            if df is not None:
+                display_model_performance_summary()
         sys.exit(0)
     
     # Generation mode (default)
