@@ -19,8 +19,8 @@ from logger_config import (
     log_section, log_pipeline_start, log_pipeline_end, log_metrics
 )
 
-DB_PATH = Path(__file__).parent / "database" / "stock_data.duckdb"
-FEATURES_PATH = Path(__file__).parent / "database" / "stock_features.parquet"
+DB_PATH = Path(__file__).parent.parent / "database" / "stock_data.duckdb"
+FEATURES_PATH = Path(__file__).parent.parent / "database" / "stock_features.parquet"
 
 # =========================================================
 # SIGNAL GENERATION - MULTIPLE STRATEGIES
@@ -831,7 +831,7 @@ def run_walk_forward_batch(
     conn = duckdb.connect(str(DB_PATH))
     
     # Load existing results for caching
-    output_path = Path(__file__).parent / "walk_forward_results.csv"
+    output_path = Path(__file__).parent.parent / "walk_forward_results.csv"
     existing_results = []
     cached_tickers = set()
     
@@ -1701,7 +1701,7 @@ Examples:
         
         if not results.empty:
             # Save results - merge with existing file to preserve all strategies
-            output_path = Path(__file__).parent / "walk_forward_results.csv"
+            output_path = Path(__file__).parent.parent / "walk_forward_results.csv"
             
             if output_path.exists():
                 # Load all existing results

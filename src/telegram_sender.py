@@ -19,9 +19,9 @@ load_dotenv()
 # CONFIGURATION
 # =========================================================
 
-DB_PATH = Path(__file__).parent / "database" / "stock_data.duckdb"
-WALK_FORWARD_CSV = Path(__file__).parent / "walk_forward_results.csv"
-SIGNALS_PATH = Path(__file__).parent / "database" / "trading_signals.parquet"
+DB_PATH = Path(__file__).parent.parent / "database" / "stock_data.duckdb"
+WALK_FORWARD_CSV = Path(__file__).parent.parent / "walk_forward_results.csv"
+SIGNALS_PATH = Path(__file__).parent.parent / "database" / "trading_signals.parquet"
 
 # Load from .env file
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -280,7 +280,7 @@ def debug_features_file():
     print("DEBUG: Inspecting features parquet file (signal_engine input)...")
     print("=" * 80)
     
-    features_path = Path(__file__).parent / "database" / "stock_features.parquet"
+    features_path = Path(__file__).parent.parent / "database" / "stock_features.parquet"
     
     if not features_path.exists():
         print(f"⚠️  Features file not found at: {features_path}")

@@ -15,8 +15,8 @@ import numpy as np
 # CONFIGURATION
 # =========================================================
 
-DB_PATH = Path(__file__).parent / "database" / "stock_data.duckdb"
-WALK_FORWARD_CSV = Path(__file__).parent / "walk_forward_results.csv"
+DB_PATH = Path(__file__).parent.parent / "database" / "stock_data.duckdb"
+WALK_FORWARD_CSV = Path(__file__).parent.parent / "walk_forward_results.csv"
 
 # =========================================================
 # QUERY FUNCTIONS

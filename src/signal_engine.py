@@ -5,8 +5,8 @@ import duckdb
 import numpy as np
 from datetime import datetime
 
-FEATURE_PATH = Path(__file__).parent / "database" / "stock_features.parquet"
-SIGNAL_PATH = Path(__file__).parent / "database" / "trading_signals.parquet"
+FEATURE_PATH = Path(__file__).parent.parent / "database" / "stock_features.parquet"
+SIGNAL_PATH = Path(__file__).parent.parent / "database" / "trading_signals.parquet"
 
 
 # ======================================================

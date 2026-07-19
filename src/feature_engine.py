@@ -21,8 +21,8 @@ from logger_config import (
     log_section, log_pipeline_start, log_pipeline_end, log_metrics
 )
 
-DB_PATH = Path(__file__).parent / "database" / "stock_data.duckdb"
-FEATURES_PATH = Path(__file__).parent / "database" / "stock_features.parquet"
+DB_PATH = Path(__file__).parent.parent / "database" / "stock_data.duckdb"
+FEATURES_PATH = Path(__file__).parent.parent / "database" / "stock_features.parquet"
 
 # Configuration
 MIN_DATA_POINTS = 50  # Minimum rows required to compute features
