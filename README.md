@@ -36,16 +36,16 @@ bash run_pipeline.sh
 .\run_pipeline.ps1
 
 # Or run individual steps:
-python incremental_collector.py --test   # Step 1: Download data (test mode)
-python feature_engine.py                  # Step 2: Generate features
-python signal_engine.py                   # Step 3: Generate trading signals
-python backtester.py --limit 10          # Step 4: Backtest strategies
-python telegram_sender.py --signals-buy  # Step 5: Send real-time signals
+python src/incremental_collector.py --test   # Step 1: Download data (test mode)
+python src/feature_engine.py                  # Step 2: Generate features
+python src/signal_engine.py                   # Step 3: Generate trading signals
+python src/backtester.py --limit 10          # Step 4: Backtest strategies
+python src/telegram_sender.py --signals-buy  # Step 5: Send real-time signals
 
 # 3. Analyze & send alerts
-python query_backtest_results.py                    # View backtest rankings
-python telegram_sender.py --signals-buy --limit 10 # Send today's buy signals
-python telegram_sender.py --all                    # Send comprehensive package
+python src/query_backtest_results.py                    # View backtest rankings
+python src/telegram_sender.py --signals-buy --limit 10 # Send today's buy signals
+python src/telegram_sender.py --all                    # Send comprehensive package
 ```
 
 **For complete setup instructions, see [docs/QUICKSTART.md](docs/QUICKSTART.md)**
@@ -76,7 +76,7 @@ stock-trading-pipeline/
 │   ├── LICENSE
 │   └── [more docs...]
 │
-├── Core Pipeline Scripts (5 Steps):
+├── src/                            (Core Pipeline Scripts)
 │   ├── incremental_collector.py    (STEP 1: download stock data, 8 threads)
 │   ├── feature_engine.py           (STEP 2: compute 46+ indicators, 8 workers)
 │   ├── signal_engine.py            (STEP 3: generate trading signals, 4-strategy voting)
@@ -345,30 +345,30 @@ Columns: strategy_name, ticker, total_return, buy_hold_return, sharpe_ratio,
 
 ### Download data for 50 stocks
 ```bash
-python incremental_collector.py --limit 50
+python src/incremental_collector.py --limit 50
 ```
 
 ### Compute features
 ```bash
-python feature_engine.py
+python src/feature_engine.py
 ```
 
 ### Backtest strategies
 ```bash
 # Quick test: 2 strategies × 5 tickers
-python -c "from backtester import run_backtest; run_backtest(limit=5, strategies=['rsi_classic', 'macd_only'], num_workers=2)"
+python -c "from src.backtester import run_backtest; run_backtest(limit=5, strategies=['rsi_classic', 'macd_only'], num_workers=2)"
 
 # Full backtest: all 28 strategies × all available tickers
-python -c "from backtester import run_backtest; run_backtest()"
+python -c "from src.backtester import run_backtest; run_backtest()"
 
 # Force re-run without using cache
-python -c "from backtester import run_backtest; run_backtest(force_rerun=True)"
+python -c "from src.backtester import run_backtest; run_backtest(force_rerun=True)"
 ```
 
 ### Generate daily trading signals
 ```bash
 # Generate today's buy/sell signals
-python signal_engine.py
+python src/signal_engine.py
 
 # View signals
 python -c "
@@ -381,29 +381,29 @@ print(df[df['final_signal'] != 0].tail(20))  # Show today's signals
 ### Send Telegram alerts (RECOMMENDED - Real-Time Daily Signals)
 ```bash
 # Today's buy signals with backtest validation (REAL-TIME)
-python telegram_sender.py --signals-buy --limit 10
+python src/telegram_sender.py --signals-buy --limit 10
 
 # Today's sell signals
-python telegram_sender.py --signals-sell --limit 5
+python src/telegram_sender.py --signals-sell --limit 5
 
 # Today's signal breakdown summary
-python telegram_sender.py --signal-summary
+python src/telegram_sender.py --signal-summary
 
 # Walk-forward recommendations (more conservative, weekly)
-python telegram_sender.py --wf-buy --limit 10
+python src/telegram_sender.py --wf-buy --limit 10
 
 # Comprehensive package (all alerts)
-python telegram_sender.py --all
+python src/telegram_sender.py --all
 ```
 
 ### Analyze backtest results
 ```bash
 # Generate full strategy report with rankings
-python query_backtest_results.py
+python src/query_backtest_results.py
 
 # Query results in Python
 python -c "
-from query_backtest_results import top_strategies, query_results
+from src.query_backtest_results import top_strategies, query_results
 print('Top 10 strategies by Sharpe ratio:')
 print(top_strategies(n=10, metric='sharpe'))
 
@@ -415,6 +415,10 @@ print(query_results(ticker='AAPL', sort_by='sharpe'))
 ### Query results in Python
 ```python
 import duckdb
+import sys
+
+# Add src to Python path for imports
+sys.path.insert(0, 'src')
 
 conn = duckdb.connect("database/stock_data.duckdb")
 
@@ -433,7 +437,19 @@ conn.close()
 
 ### Query results in SQL
 ```bash
+# Interactive query mode
 duckdb database/stock_data.duckdb
+```
+
+### Run scripts from src/ folder
+```bash
+# All scripts now located in src/ subdirectory
+python src/incremental_collector.py
+python src/feature_engine.py
+python src/signal_engine.py
+python src/backtester.py
+python src/telegram_sender.py
+python src/query_backtest_results.py
 ```
 
 ```sql
@@ -513,6 +529,81 @@ Complete execution times from full pipeline run on standard hardware (8 CPU core
 - **Audit trail**: All errors logged with context (ticker, date range, error message)
 - **Partial success**: Reports success/failed counts separately
 - **Graceful degradation**: Returns available results even if some tests fail
+
+## Cron Jobs / Scheduling
+
+Automatically run the pipeline on a schedule using cron jobs. Add these to your crontab:
+
+```bash
+crontab -e
+```
+
+**Stock Pipeline Cron Jobs:**
+
+```bash
+# Daily backtest & alerts (weekdays at 6:30 PM)
+30 18 * * 1-5 cd /mnt/external/stock-trading-pipeline && ./run_pipeline.sh --workers 2 --telegram-all >> logs/cron.log 2>&1
+
+# Clean up old logs (first day of month at 3 AM - keeps logs from last 30 days)
+0 3 1 * * find /mnt/external/stock-trading-pipeline/logs -name "*.log" -mtime +30 -delete
+
+# Weekly walk-forward analysis (Sundays at 4 AM - more thorough, anti-overfitting)
+0 4 * * 0 cd /mnt/external/stock-trading-pipeline && /home/piuser/.venv-stock/bin/python src/backtester.py --walk-forward --force-rerun >> logs/walk_forward_$(date +\%Y\%m\%d).log 2>&1
+```
+
+**Cron Schedule Breakdown:**
+
+| Job | Schedule | Frequency | Purpose |
+|-----|----------|-----------|---------|
+| Daily Pipeline | `30 18 * * 1-5` | Weekdays 6:30 PM | Run full pipeline with comprehensive alerts |
+| Log Cleanup | `0 3 1 * * ` | Monthly (1st at 3 AM) | Remove logs older than 30 days |
+| Walk-Forward | `0 4 * * 0` | Weekly (Sundays 4 AM) | Anti-overfitting analysis with fresh backtest |
+
+**Setup Instructions:**
+
+1. **Edit crontab:**
+   ```bash
+   crontab -e
+   ```
+
+2. **Add the three jobs above** (adjust paths and venv path as needed for your environment)
+
+3. **Verify installation:**
+   ```bash
+   crontab -l  # List all cron jobs
+   ```
+
+4. **Monitor execution:**
+   ```bash
+   # View cron logs
+   tail -f logs/cron.log
+   tail -f logs/walk_forward_*.log
+   
+   # Check system cron logs (varies by OS)
+   grep CRON /var/log/syslog          # Ubuntu/Debian
+   log stream --predicate 'eventMessage contains[cd] "cron"'  # macOS
+   ```
+
+**Important Notes:**
+
+- ✅ **Absolute paths required**: Use full paths to scripts and venv python
+- ✅ **Output redirection**: `>> logs/cron.log 2>&1` captures all output
+- ✅ **Virtual environment**: Use full path to venv python: `/home/piuser/.venv-stock/bin/python`
+- ✅ **Working directory**: `cd` to pipeline directory first
+- ✅ **Log rotation**: The cleanup job removes logs older than 30 days on the 1st of each month
+- ✅ **Timezone**: Cron uses system timezone; verify with `timedatectl` or `date`
+
+**Example Output:**
+```bash
+# logs/cron.log
+2026-07-18 18:30:01 | Starting Stock Trading Pipeline
+2026-07-18 18:31:45 | ✓ Data download complete (285 new rows)
+2026-07-18 18:32:10 | ✓ Feature generation complete (2.89M rows)
+2026-07-18 18:33:05 | ✓ Signal generation complete (127 buy signals)
+2026-07-18 18:35:50 | ✓ Backtesting complete (13,972 tests)
+2026-07-18 18:36:20 | ✓ Telegram alerts sent (23 signals + backtest validation)
+2026-07-18 18:36:20 | Pipeline completed in 6m 19s
+```
 
 ## Monitoring & Debugging
 

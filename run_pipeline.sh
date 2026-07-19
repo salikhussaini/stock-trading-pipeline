@@ -279,7 +279,7 @@ else
     log_step "[1/5] Downloading stock data..."
     echo ""
     
-    CMD="$PYTHON incremental_collector.py --workers $WORKERS --batch-size $BATCH_SIZE"
+    CMD="$PYTHON src/incremental_collector.py --workers $WORKERS --batch-size $BATCH_SIZE"
     if [ "$TEST_MODE" = true ]; then
         CMD="$CMD --test"
     fi
@@ -304,7 +304,7 @@ STEP2_START=$(date +%s)
 log_step "[2/5] Generating features..."
 echo ""
 
-if $PYTHON feature_engine.py; then
+if $PYTHON src/feature_engine.py; then
     FEATURE_TIME=$(($(date +%s) - STEP2_START))
     log_step "✓ Feature generation complete"
     log_info "Time: $(format_time $FEATURE_TIME)"
@@ -323,7 +323,7 @@ STEP3_START=$(date +%s)
 log_step "[3/5] Generating trading signals..."
 echo ""
 
-if $PYTHON signal_engine.py; then
+if $PYTHON src/signal_engine.py; then
     SIGNAL_TIME=$(($(date +%s) - STEP3_START))
     log_step "✓ Signal generation complete"
     log_info "Time: $(format_time $SIGNAL_TIME)"
@@ -349,7 +349,7 @@ if [ "$BACKTEST_MODE" = "both" ]; then
     log_info "Running both standard backtest + walk-forward analysis..."
     log_info "Walk-forward on all tickers..."
     
-    if $PYTHON backtester.py; then
+    if $PYTHON src/backtester.py; then
         log_step "✓ Both modes complete"
     else
         log_error "✗ Backtesting failed"
@@ -360,7 +360,7 @@ if [ "$BACKTEST_MODE" = "both" ]; then
 elif [ "$BACKTEST_MODE" = "standard" ]; then
     log_info "Running standard backtest (28 strategies)..."
     
-    if $PYTHON backtester.py --standard; then
+    if $PYTHON src/backtester.py --standard; then
         log_step "✓ Standard backtest complete"
     else
         log_error "✗ Standard backtest failed"
@@ -372,7 +372,7 @@ elif [ "$BACKTEST_MODE" = "walk-forward" ]; then
     log_info "Running walk-forward analysis (anti-overfitting)..."
     log_info "Analyzing $WALK_FORWARD_LIMIT tickers..."
     
-    if $PYTHON backtester.py --walk-forward --limit $WALK_FORWARD_LIMIT; then
+    if $PYTHON src/backtester.py --walk-forward --limit $WALK_FORWARD_LIMIT; then
         log_step "✓ Walk-forward analysis complete"
     else
         log_error "✗ Walk-forward analysis failed"
@@ -410,7 +410,7 @@ else
         TELEGRAM_MODE="signals"  # Explicit, use as-is
     fi
     
-    TELEGRAM_CMD="$PYTHON telegram_sender.py"
+    TELEGRAM_CMD="$PYTHON src/telegram_sender.py"
     
     case $TELEGRAM_MODE in
         signals)
