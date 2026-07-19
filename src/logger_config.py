@@ -14,7 +14,7 @@ import sys
 # LOGGER SETUP
 # =========================================================
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 LOGS_DIR = BASE_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 

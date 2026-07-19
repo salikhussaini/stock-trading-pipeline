@@ -84,7 +84,7 @@ def get_last_trading_day():
 # CONFIG
 # =========================================================
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "database" / "stock_data.duckdb"
 TICKERS_FILE = BASE_DIR / "tickers.csv"
 

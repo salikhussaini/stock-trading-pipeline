@@ -17,11 +17,11 @@ import yfinance as yf
 # CONFIG
 # =========================================================
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "database" / "stock_data.duckdb"
 TICKERS_FILE = BASE_DIR / "tickers.csv"
 
-DB_PATH.parent.mkdir(exist_ok=True)
+DB_PATH.parent.parent.mkdir(exist_ok=True)
 
 run_id = str(uuid.uuid4())
 pipeline_name = "daily_collector"

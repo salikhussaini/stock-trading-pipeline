@@ -26,10 +26,10 @@ from logger_config import (
 )
 
 # Configuration
-FEATURES_PATH = Path(__file__).parent / "database" / "stock_features.parquet"
-MODELS_PATH = Path(__file__).parent / "database" / "ml_models"
-SIGNALS_PATH = Path(__file__).parent / "database" / "ml_signals.parquet"
-PERFORMANCE_PATH = Path(__file__).parent / "database" / "model_performance.parquet"
+FEATURES_PATH = Path(__file__).parent.parent / "database" / "stock_features.parquet"
+MODELS_PATH = Path(__file__).parent.parent / "database" / "ml_models"
+SIGNALS_PATH = Path(__file__).parent.parent / "database" / "ml_signals.parquet"
+PERFORMANCE_PATH = Path(__file__).parent.parent / "database" / "model_performance.parquet"
 
 # Model hyperparameters
 XGB_PARAMS = {
