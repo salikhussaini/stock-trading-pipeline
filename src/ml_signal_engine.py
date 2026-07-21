@@ -48,7 +48,7 @@ BEARISH_THRESHOLD = 0.40  # Confidence threshold for sell signal
 TARGET_FORWARD_DAYS = 5    # Predict price movement N days ahead
 
 # Feature selection
-META_COLS = ['ticker', 'report_date', 'close', 'volume', 'sector','GICS Sub-Industry', 'stock_name']
+META_COLS = ['ticker', 'report_date', 'close', 'volume', 'sector', 'GICS Sub-Industry', 'stock_name']
 DROP_COLS = ['open', 'high', 'low', 'adj_close']  # Raw OHLCV columns
 
 # =========================================================
@@ -104,24 +104,25 @@ def create_target_variable(df, forward_days=TARGET_FORWARD_DAYS):
     """
     Create binary classification target: 1 if price rises in next N days, else 0.
     Prevents look-ahead bias by only creating targets where future data exists.
+    Uses shift() for robust forward-looking window.
     """
-    df['target'] = np.nan
+    # Ensure data is sorted by ticker and date
+    df = df.sort_values(['ticker', 'report_date']).reset_index(drop=True)
     
-    for ticker in df['ticker'].unique():
-        mask = df['ticker'] == ticker
-        ticker_indices = df[mask].index
-        
-        for i, idx in enumerate(ticker_indices[:-forward_days]):
-            future_idx = ticker_indices[i + forward_days]
-            future_price = df.loc[future_idx, 'close']
-            current_price = df.loc[idx, 'close']
-            df.loc[idx, 'target'] = 1 if future_price > current_price else 0
+    # Create future price column (shifted by forward_days for each ticker)
+    df['future_close'] = df.groupby('ticker')['close'].shift(-forward_days)
     
-    # Only keep rows where target was successfully computed
-    valid_rows = df['target'].notna()
+    # Create target: 1 if price rises, 0 otherwise
+    df['target'] = (df['future_close'] > df['close']).astype(int)
+    
+    # Drop rows where we don't have future data
     initial = len(df)
-    df = df[valid_rows].reset_index(drop=True)
-    log_info(f"Created targets: {(initial - len(df)):,} rows removed (not enough future data)")
+    df = df.dropna(subset=['future_close']).reset_index(drop=True)
+    dropped = initial - len(df)
+    log_info(f"Created targets: {dropped:,} rows removed (not enough future data)")
+    
+    # Drop the temporary future_close column
+    df = df.drop('future_close', axis=1)
     
     return df
 
