@@ -96,7 +96,10 @@ def get_ticker_fundamentals(ticker):
             'beta': info.get('beta', np.nan),
         }
         
-        log_info(f"{ticker} | SUCCESS | P/E={fundamentals['pe_ratio']:.2f if not np.isnan(fundamentals['pe_ratio']) else 'N/A'}")
+        # Format P/E for logging (fix f-string format specifier)
+        pe_val = fundamentals['pe_ratio']
+        pe_str = f"{pe_val:.2f}" if not np.isnan(pe_val) else 'N/A'
+        log_info(f"{ticker} | SUCCESS | P/E={pe_str}")
         return fundamentals
         
     except Exception as e:
