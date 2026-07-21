@@ -195,6 +195,18 @@ def train_and_predict_sector(sector_df, feature_cols, sector_name):
             log_warning(f"  {sector_name}: Insufficient samples ({len(X)} < 100), skipping")
             return None, None
         
+        # Diagnostic: Check feature-target correlation (only for first sector to avoid spam)
+        if sector_name == sorted(sector_df['sector'].unique())[0]:
+            feature_target_corr = np.abs([np.corrcoef(X[:, i], y)[0, 1] for i in range(min(10, X.shape[1]))])
+            max_corr = np.max(feature_target_corr)
+            log_info(f"  Max feature-target correlation: {max_corr:.4f} (>0.1 needed for predictive power)")
+            if max_corr < 0.05:
+                log_warning(
+                    "  ⚠️  Very weak feature-target correlation (<0.05).\n"
+                    "     Technical indicators are not predictive of 10-day returns.\n"
+                    "     Consider using rule-based signal_engine.py instead of ML."
+                )
+        
         # Walk-forward validation (time series split)
         n_splits = min(3, len(X) // 100)  # Reduced from 5 to 3 for speed
         tscv = TimeSeriesSplit(n_splits=n_splits)
@@ -355,10 +367,22 @@ def generate_ml_signals(validate_features_flag=True):
     df_feat = create_target_variable(df_feat, TARGET_FORWARD_DAYS)
     
     # -------------------------
-    # GET FEATURE COLUMNS
+    # GET FEATURE COLUMNS & VALIDATE TARGET DISTRIBUTION
     # -------------------------
     feature_cols = get_feature_columns(df_feat)
     log_info(f"Using {len(feature_cols)} features for training")
+    
+    # Check target class balance
+    target_dist = df_feat['target'].value_counts(normalize=True)
+    log_info(f"Target distribution: Bearish (0): {target_dist.get(0, 0):.1%}, Bullish (1): {target_dist.get(1, 0):.1%}")
+    
+    # Warning if target is nearly 50/50 (suggests random/unpredictable)
+    if 0.48 <= target_dist.get(1, 0.5) <= 0.52:
+        log_warning(
+            "⚠️  Target distribution is ~50/50, suggesting 10-day forward returns are random/unpredictable.\n"
+            "    Technical indicators may not have predictive power for short-term price movements.\n"
+            "    Consider: (1) Longer horizons (20-30 days), (2) Relative returns vs SPY, or (3) Fundamental features."
+        )
     
     # -------------------------
     # TRAIN & GENERATE SIGNALS (PER SECTOR, NOT PER TICKER)

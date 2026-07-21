@@ -453,6 +453,26 @@ def run_feature_pipeline(num_workers=8, force=False):
         log_info(f"  Top NaN features: {', '.join([f'{col}({pct:.1f}%)' for col, pct in worst_features.items()])}")
 
     # -------------------------
+    # MERGE FUNDAMENTAL FEATURES (OPTIONAL - won't break if file doesn't exist)
+    # -------------------------
+    fundamentals_path = Path(__file__).parent.parent / "database" / "stock_fundamentals.parquet"
+    if fundamentals_path.exists():
+        log_info("Merging fundamental features...")
+        try:
+            fund_conn = duckdb.connect()
+            df_fund = fund_conn.execute(f"SELECT * FROM read_parquet('{fundamentals_path}')").df()
+            fund_conn.close()
+            
+            # Merge on ticker (fundamentals are constant per ticker, broadcast to all dates)
+            df_feat = df_feat.merge(df_fund.drop(columns=['update_date', 'error'], errors='ignore'), 
+                                    on='ticker', how='left')
+            log_info(f"Added {len(df_fund.columns)-2} fundamental features")
+        except Exception as e:
+            log_warning(f"Could not merge fundamentals: {e}")
+    else:
+        log_info("No fundamental data found (skipping). Run fundamental_collector.py to add.")
+    
+    # -------------------------
     # WRITE TO PARQUET (Fast, compressed storage via DuckDB)
     # Keep only ticker, report_date, close, volume, and computed features (drop raw OHLCV)
     # -------------------------

@@ -296,6 +296,28 @@ else
 fi
 
 # =========================================================
+# STEP 1.5: Collect Fundamental Data (OPTIONAL - enhances ML)
+# =========================================================
+
+STEP1_5_START=$(date +%s)
+
+log_step "[1.5/5] Collecting fundamental data (OPTIONAL)..."
+log_info "This step adds P/E, earnings, insider trades, etc. for better ML predictions"
+echo ""
+
+# Run fundamental collector (non-blocking - pipeline continues even if this fails)
+if $PYTHON src/fundamental_collector.py --workers 4 2>/dev/null; then
+    FUNDAMENTAL_TIME=$(($(date +%s) - STEP1_5_START))
+    log_step "✓ Fundamental data collection complete"
+    log_info "Time: $(format_time $FUNDAMENTAL_TIME)"
+    echo ""
+else
+    log_warning "⚠ Fundamental data collection skipped or failed (pipeline will continue)"
+    log_info "ML models will use technical indicators only"
+    echo ""
+fi
+
+# =========================================================
 # STEP 2: Generate Features
 # =========================================================
 
