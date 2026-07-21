@@ -145,21 +145,54 @@ def prepare_training_data(df, feature_cols):
     
     return X, y, df
 
-def train_and_predict_ticker(ticker_df, feature_cols, ticker_name):
+def load_sectors_from_csv():
     """
-    Train XGBoost model with walk-forward validation for single ticker.
+    Load ticker-to-sector mapping from tickers.csv.
+    Expected format: ticker,sector
+    If sector column missing, fetches from yfinance (slower but works).
+    """
+    tickers_path = Path(__file__).parent.parent / "tickers.csv"
+    
+    try:
+        df = pd.read_csv(tickers_path)
+        
+        if "sector" in df.columns:
+            log_info(f"Loaded {len(df)} tickers with sector information")
+            return dict(zip(df['ticker'], df['sector']))
+        elif "Sector" in df.columns:
+            log_info(f"Loaded {len(df)} tickers with sector information")
+            return dict(zip(df['ticker'], df['Sector']))
+        else:
+            log_warning("No sector column in tickers.csv, will fetch from yfinance...")
+            return None
+    except Exception as e:
+        log_error(f"Could not load sectors: {e}")
+        return None
+
+def get_sector_for_ticker(ticker):
+    """Fetch sector for a single ticker from yfinance."""
+    try:
+        info = yf.Ticker(ticker).info
+        return info.get('sector', 'Unknown')
+    except:
+        return 'Unknown'
+
+def train_and_predict_sector(sector_df, feature_cols, sector_name):
+    """
+    Train XGBoost model with walk-forward validation for entire sector.
+    One model for all stocks in the sector.
     Calculates performance metrics: accuracy, precision, recall, F1, ROC-AUC.
     Returns tuple: (signals_df, performance_metrics_dict)
     """
     try:
-        X, y, df = prepare_training_data(ticker_df, feature_cols)
+        X, y, df = prepare_training_data(sector_df, feature_cols)
         
-        if len(X) < 50:
-            log_warning(f"  {ticker_name}: Insufficient samples ({len(X)} < 50), skipping")
+        if len(X) < 100:
+            log_warning(f"  {sector_name}: Insufficient samples ({len(X)} < 100), skipping")
             return None, None
         
         # Walk-forward validation (time series split)
-        n_splits = min(5, len(X) // 50)  # Ensure minimum 50 samples per split
+        n_splits = min(3, len(X) // 100)  # Reduced from 5 to 3 for speed
         tscv = TimeSeriesSplit(n_splits=n_splits)
         
         all_signals = []
@@ -225,7 +258,7 @@ def train_and_predict_ticker(ticker_df, feature_cols, ticker_name):
         
         # Aggregate performance metrics
         performance = {
-            'ticker': ticker_name,
+            'sector': sector_name,
             'total_samples': len(X),
             'n_folds': len(all_accuracies),
             'accuracy': np.mean(all_accuracies),
@@ -246,24 +279,27 @@ def train_and_predict_ticker(ticker_df, feature_cols, ticker_name):
         return result, performance
     
     except Exception as e:
-        log_error(f"  {ticker_name}: {str(e)}")
+        log_error(f"  {sector_name}: {str(e)}")
         return None, None
 
 def generate_ml_signals(validate_features_flag=True):
     """
-    Generate ML-based buy/sell signals for all tickers.
+    Generate ML-based buy/sell signals using SECTOR-BASED CLUSTERING.
     
     Process:
     1. Load features from parquet (created by feature_engine)
-    2. Create binary classification targets (5-day forward return)
-    3. Train XGBoost with walk-forward validation per ticker
-    4. Generate signals based on predicted probabilities
-    5. Save results to parquet
+    2. Load sector information from tickers.csv
+    3. Create binary classification targets (5-day forward return)
+    4. Train ONE XGBoost model PER SECTOR (not per ticker)
+    5. Generate signals based on predicted probabilities
+    6. Save results to parquet
+    
+    Runtime: ~10-15 minutes (vs 1-2 hours with per-ticker models)
     
     Returns:
         DataFrame with columns: [ticker, report_date, close, ml_signal, ml_probability, target]
     """
-    log_section("ML Signal Generation")
+    log_section("ML Signal Generation (Sector-Based)")
     
     # -------------------------
     # LOAD & VALIDATE FEATURES
@@ -281,6 +317,27 @@ def generate_ml_signals(validate_features_flag=True):
     log_info(f"Processing {n_tickers} tickers with {len(df_feat):,} rows")
     
     # -------------------------
+    # LOAD SECTOR INFORMATION
+    # -------------------------
+    ticker_sectors = load_sectors_from_csv()
+    
+    if ticker_sectors is None:
+        log_warning("Sector CSV not available, fetching from yfinance (slow)...")
+        ticker_sectors = {}
+        for ticker in df_feat['ticker'].unique():
+            ticker_sectors[ticker] = get_sector_for_ticker(ticker)
+            time.sleep(0.2)  # Rate limit
+    
+    # Add sector column
+    df_feat['sector'] = df_feat['ticker'].map(ticker_sectors).fillna('Unknown')
+    
+    n_sectors = df_feat['sector'].nunique()
+    sector_dist = df_feat['ticker'].groupby(df_feat['sector']).nunique()
+    log_info(f"Grouped into {n_sectors} sectors")
+    for sector, count in sector_dist.items():
+        log_info(f"  {sector}: {count} tickers")
+    
+    # -------------------------
     # CREATE TARGETS (5-day forward prediction)
     # -------------------------
     log_info("Creating target variables (5-day forward returns)...")
@@ -293,34 +350,35 @@ def generate_ml_signals(validate_features_flag=True):
     log_info(f"Using {len(feature_cols)} features for training")
     
     # -------------------------
-    # TRAIN & GENERATE SIGNALS (PER TICKER)
+    # TRAIN & GENERATE SIGNALS (PER SECTOR, NOT PER TICKER)
     # -------------------------
-    log_info(f"Training models and generating signals...")
+    log_info(f"Training sector models and generating signals...")
     
     all_signals = []
     all_performance = []
-    successful_tickers = []
-    failed_tickers = []
+    successful_sectors = []
+    failed_sectors = []
     
     process_start = time.perf_counter()
     
-    for i, ticker in enumerate(sorted(df_feat['ticker'].unique()), 1):
-        ticker_df = df_feat[df_feat['ticker'] == ticker].sort_values('report_date').reset_index(drop=True)
+    for i, sector in enumerate(sorted(df_feat['sector'].unique()), 1):
+        sector_df = df_feat[df_feat['sector'] == sector].sort_values('report_date').reset_index(drop=True)
+        sector_tickers = sector_df['ticker'].nunique()
         
-        log_info(f"  [{i}/{n_tickers}] {ticker} ({len(ticker_df)} rows)")
+        log_info(f"  [{i}/{n_sectors}] {sector} ({len(sector_df)} rows, {sector_tickers} tickers)")
         
-        result, perf = train_and_predict_ticker(ticker_df, feature_cols, ticker)
+        result, perf = train_and_predict_sector(sector_df, feature_cols, sector)
         if result is not None:
             all_signals.append(result)
             all_performance.append(perf)
-            successful_tickers.append(ticker)
-            # Log ticker-specific metrics
+            successful_sectors.append(sector)
+            # Log sector-specific metrics
             log_info(f"      Accuracy: {perf['accuracy']:.3f} | F1: {perf['f1_score']:.3f} | ROC-AUC: {perf['roc_auc']:.3f}")
         else:
-            failed_tickers.append(ticker)
+            failed_sectors.append(sector)
     
     process_time = time.perf_counter() - process_start
-    log_info(f"Signal generation: {process_time:.1f}s ({n_tickers/max(process_time, 0.1):.1f} tickers/sec)")
+    log_info(f"Sector model training: {process_time:.1f}s ({n_sectors/max(process_time, 0.1):.1f} sectors/sec)")
     
     if not all_signals:
         log_error("No signals generated")
@@ -331,9 +389,9 @@ def generate_ml_signals(validate_features_flag=True):
     # -------------------------
     df_signals = pd.concat(all_signals, ignore_index=True).sort_values(['ticker', 'report_date'])
     
-    log_info(f"Generated signals for {len(successful_tickers)} tickers")
-    if failed_tickers:
-        log_warning(f"Failed: {', '.join(failed_tickers[:5])}")
+    log_info(f"Generated signals for {len(successful_sectors)} sectors")
+    if failed_sectors:
+        log_warning(f"Failed: {', '.join(failed_sectors)}")
     
     # -------------------------
     # SAVE SIGNALS TO PARQUET
@@ -354,7 +412,7 @@ def generate_ml_signals(validate_features_flag=True):
     # SAVE MODEL PERFORMANCE METRICS TO PARQUET
     # -------------------------
     if all_performance:
-        log_info(f"Saving model performance metrics to {PERFORMANCE_PATH.name}...")
+        log_info(f"Saving sector model performance metrics to {PERFORMANCE_PATH.name}...")
         df_perf = pd.DataFrame(all_performance)
         
         perf_start = time.perf_counter()
@@ -366,16 +424,12 @@ def generate_ml_signals(validate_features_flag=True):
         log_info(f"Performance metrics saved in {perf_time:.1f}s")
         
         # Log aggregated performance stats
-        log_info("Aggregated Model Performance:")
+        log_info("Aggregated Sector Model Performance:")
         log_info(f"  Accuracy:  {df_perf['accuracy'].mean():.3f} ± {df_perf['accuracy'].std():.3f}")
         log_info(f"  Precision: {df_perf['precision'].mean():.3f} ± {df_perf['precision'].std():.3f}")
         log_info(f"  Recall:    {df_perf['recall'].mean():.3f} ± {df_perf['recall'].std():.3f}")
         log_info(f"  F1-Score:  {df_perf['f1_score'].mean():.3f} ± {df_perf['f1_score'].std():.3f}")
         log_info(f"  ROC-AUC:   {df_perf['roc_auc'].mean():.3f} ± {df_perf['roc_auc'].std():.3f}")
-    
-    # -------------------------
-    # SIGNAL STATISTICS
-    # -------------------------
     
     # -------------------------
     # SIGNAL STATISTICS
@@ -387,7 +441,8 @@ def generate_ml_signals(validate_features_flag=True):
         "Hold (0)": signal_dist.get(0, 0),
         "Sell (-1)": signal_dist.get(-1, 0),
         "Avg Probability": f"{df_signals['ml_probability'].mean():.3f}",
-        "Tickers": len(successful_tickers)
+        "Sectors": len(successful_sectors),
+        "Tickers": df_signals['ticker'].nunique()
     })
     
     return df_signals
@@ -464,8 +519,8 @@ def get_model_performance():
     conn.close()
     return df
 
-def get_model_performance_by_ticker(ticker):
-    """Get performance metrics for specific ticker."""
+def get_model_performance_by_sector(sector):
+    """Get performance metrics for specific sector."""
     if not PERFORMANCE_PATH.exists():
         log_error(f"Performance metrics file not found: {PERFORMANCE_PATH}")
         return None
@@ -473,16 +528,31 @@ def get_model_performance_by_ticker(ticker):
     conn = duckdb.connect()
     query = f"""
         SELECT * FROM read_parquet('{PERFORMANCE_PATH}')
-        WHERE ticker = '{ticker}'
+        WHERE sector = '{sector}'
     """
     result = conn.execute(query).df()
     conn.close()
     
     if len(result) == 0:
-        log_warning(f"No performance metrics found for {ticker}")
+        log_warning(f"No performance metrics found for sector {sector}")
         return None
     
     return result.iloc[0]
+
+def get_model_performance_by_ticker(ticker):
+    """Get performance metrics for specific ticker (looks up sector)."""
+    if not PERFORMANCE_PATH.exists():
+        log_error(f"Performance metrics file not found: {PERFORMANCE_PATH}")
+        return None
+    
+    # First, load ticker-sector mapping
+    ticker_sectors = load_sectors_from_csv()
+    if ticker_sectors is None or ticker not in ticker_sectors:
+        log_warning(f"Sector information not found for {ticker}")
+        return None
+    
+    sector = ticker_sectors[ticker]
+    return get_model_performance_by_sector(sector)
 
 def display_model_performance_summary():
     """Display formatted model performance summary."""
@@ -492,12 +562,12 @@ def display_model_performance_summary():
         return
     
     print("\n" + "="*100)
-    print("MODEL PERFORMANCE SUMMARY (All Tickers)")
+    print("MODEL PERFORMANCE SUMMARY (All Sectors)")
     print("="*100)
     
     # Summary statistics
     print("\nAGGREGATED METRICS:")
-    print(f"  Total Tickers:    {len(df)}")
+    print(f"  Total Sectors:    {len(df)}")
     print(f"  Accuracy:         {df['accuracy'].mean():.4f} ± {df['accuracy'].std():.4f}")
     print(f"  Precision:        {df['precision'].mean():.4f} ± {df['precision'].std():.4f}")
     print(f"  Recall:           {df['recall'].mean():.4f} ± {df['recall'].std():.4f}")
@@ -505,19 +575,19 @@ def display_model_performance_summary():
     print(f"  ROC-AUC:          {df['roc_auc'].mean():.4f} ± {df['roc_auc'].std():.4f}")
     
     # Top performers
-    print("\nTOP 10 PERFORMERS (by ROC-AUC):")
-    top_df = df.nlargest(10, 'roc_auc')[['ticker', 'accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'total_samples']]
+    print("\nTOP PERFORMERS (by ROC-AUC):")
+    top_df = df.nlargest(10, 'roc_auc')[['sector', 'accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'total_samples']]
     print(top_df.to_string(index=False))
     
     # Bottom performers
-    print("\nBOTTOM 10 PERFORMERS (by ROC-AUC):")
-    bottom_df = df.nsmallest(10, 'roc_auc')[['ticker', 'accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'total_samples']]
+    print("\nBOTTOM PERFORMERS (by ROC-AUC):")
+    bottom_df = df.nsmallest(10, 'roc_auc')[['sector', 'accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'total_samples']]
     print(bottom_df.to_string(index=False))
     
     # Full detailed table
-    print("\nDETAILED PERFORMANCE (All Tickers):")
+    print("\nDETAILED PERFORMANCE (All Sectors):")
     detailed = df[[
-        'ticker', 'total_samples', 'n_folds', 'accuracy', 'precision', 
+        'sector', 'total_samples', 'n_folds', 'accuracy', 'precision', 
         'recall', 'f1_score', 'roc_auc', 'bullish_signals', 'bearish_signals'
     ]].copy()
     detailed['accuracy'] = detailed['accuracy'].round(4)
