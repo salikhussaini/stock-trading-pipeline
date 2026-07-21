@@ -48,7 +48,7 @@ BEARISH_THRESHOLD = 0.40  # Confidence threshold for sell signal
 TARGET_FORWARD_DAYS = 5    # Predict price movement N days ahead
 
 # Feature selection
-META_COLS = ['ticker', 'report_date', 'close', 'volume']
+META_COLS = ['ticker', 'report_date', 'close', 'volume', 'sector']
 DROP_COLS = ['open', 'high', 'low', 'adj_close']  # Raw OHLCV columns
 
 # =========================================================

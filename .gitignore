@@ -137,5 +137,5 @@ Icon??
 # Cache for yfinance
 .cache/
 
-docs/
-walk_forward_results.csv
+.docs/
+.walk_forward_results.csv
