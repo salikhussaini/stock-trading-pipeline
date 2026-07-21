@@ -33,11 +33,14 @@ PERFORMANCE_PATH = Path(__file__).parent.parent / "database" / "model_performanc
 
 # Model hyperparameters
 XGB_PARAMS = {
-    'max_depth': 5,
-    'n_estimators': 100,
-    'learning_rate': 0.1,
-    'subsample': 0.8,
-    'colsample_bytree': 0.8,
+    'max_depth': 7,           # Increased from 5 (more model capacity)
+    'n_estimators': 200,      # Increased from 100 (more trees)
+    'learning_rate': 0.05,    # Reduced from 0.1 (slower, more careful learning)
+    'subsample': 0.7,         # Reduced from 0.8 (more regularization)
+    'colsample_bytree': 0.7,  # Reduced from 0.8 (feature subsampling)
+    'gamma': 1.0,             # Minimum loss reduction for split
+    'reg_alpha': 0.5,         # L1 regularization
+    'reg_lambda': 1.0,        # L2 regularization
     'random_state': 42,
     'verbosity': 0
 }
@@ -45,7 +48,7 @@ XGB_PARAMS = {
 # Signal generation thresholds
 BULLISH_THRESHOLD = 0.60  # Confidence threshold for buy signal
 BEARISH_THRESHOLD = 0.40  # Confidence threshold for sell signal
-TARGET_FORWARD_DAYS = 5    # Predict price movement N days ahead
+TARGET_FORWARD_DAYS = 10   # Predict price movement N days ahead (10 days more predictable than 5)
 
 # Feature selection
 META_COLS = ['ticker', 'report_date', 'close', 'volume', 'sector', 'GICS Sub-Industry', 'stock_name']
@@ -217,8 +220,15 @@ def train_and_predict_sector(sector_df, feature_cols, sector_name):
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
             
-            # Train model
-            model = xgb.XGBClassifier(**XGB_PARAMS)
+            # Train model with class weight balancing for imbalanced targets
+            n_neg = np.sum(y_train == 0)
+            n_pos = np.sum(y_train == 1)
+            scale_pos_weight = max(n_neg / (n_pos + 1), 0.5)  # Avoid extreme imbalance
+            
+            params = XGB_PARAMS.copy()
+            params['scale_pos_weight'] = scale_pos_weight
+            
+            model = xgb.XGBClassifier(**params)
             model.fit(X_train_scaled, y_train, verbose=False)
             
             # Generate predictions
@@ -290,7 +300,7 @@ def generate_ml_signals(validate_features_flag=True):
     Process:
     1. Load features from parquet (created by feature_engine)
     2. Load sector information from tickers.csv
-    3. Create binary classification targets (5-day forward return)
+    3. Create binary classification targets (10-day forward return)
     4. Train ONE XGBoost model PER SECTOR (not per ticker)
     5. Generate signals based on predicted probabilities
     6. Save results to parquet
@@ -339,9 +349,9 @@ def generate_ml_signals(validate_features_flag=True):
         log_info(f"  {sector}: {count} tickers")
     
     # -------------------------
-    # CREATE TARGETS (5-day forward prediction)
+    # CREATE TARGETS (10-day forward prediction)
     # -------------------------
-    log_info("Creating target variables (5-day forward returns)...")
+    log_info("Creating target variables (10-day forward returns)...")
     df_feat = create_target_variable(df_feat, TARGET_FORWARD_DAYS)
     
     # -------------------------
